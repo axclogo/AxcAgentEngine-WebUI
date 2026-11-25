@@ -1,0 +1,14 @@
+node_modules/
+dist/
+app-dist/
+coverage/
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+.env
+*.db
+*.tgz
+test-results/
+/data/
+secret.key

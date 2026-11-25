@@ -1,0 +1,242 @@
+/* SDK stylesheet. Compiled by Tailwind v4 and scoped under .axc-root (see postcss.config.mjs).
+   Hosts theme the SDK by overriding the CSS variables below on .axc-root.
+   SDK 样式：Tailwind v4 编译后限定在 .axc-root 下；宿主在 .axc-root 上覆盖下列变量即可换肤。 */
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/preflight.css' layer(base);
+@import 'tailwindcss/utilities.css' layer(utilities);
+@import 'tw-animate-css';
+@import '@xyflow/react/dist/style.css';
+
+@source "./";
+/* Streamdown ships Tailwind classes built on the same shadcn tokens. / Streamdown 自带基于同一套 shadcn 变量的 Tailwind 类。 */
+@source "../node_modules/streamdown/dist";
+@source "../node_modules/@streamdown/code/dist";
+@source "../node_modules/@streamdown/mermaid/dist";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.985 0.003 150);
+  --foreground: oklch(0.24 0.015 210);
+  --card: oklch(1 0 0);
+  --card-foreground: var(--foreground);
+  --popover: oklch(1 0 0);
+  --popover-foreground: var(--foreground);
+  --primary: oklch(0.47 0.07 170);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.955 0.008 160);
+  --secondary-foreground: var(--foreground);
+  --muted: oklch(0.96 0.005 160);
+  --muted-foreground: oklch(0.52 0.015 200);
+  --accent: oklch(0.94 0.02 165);
+  --accent-foreground: oklch(0.3 0.04 170);
+  --destructive: oklch(0.56 0.18 30);
+  --border: oklch(0.91 0.006 160);
+  --input: oklch(0.89 0.008 160);
+  --ring: oklch(0.55 0.08 170);
+  --sidebar: oklch(0.97 0.005 150);
+  --code: oklch(0.965 0.004 150);
+  --axc-font-sans:
+    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Noto Sans CJK SC', system-ui, sans-serif;
+  --axc-font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+.dark {
+  --background: oklch(0.2 0.01 210);
+  --foreground: oklch(0.93 0.008 170);
+  --card: oklch(0.235 0.012 210);
+  --card-foreground: var(--foreground);
+  --popover: oklch(0.25 0.012 210);
+  --popover-foreground: var(--foreground);
+  --primary: oklch(0.78 0.09 165);
+  --primary-foreground: oklch(0.22 0.03 170);
+  --secondary: oklch(0.27 0.012 210);
+  --secondary-foreground: var(--foreground);
+  --muted: oklch(0.26 0.01 210);
+  --muted-foreground: oklch(0.7 0.015 190);
+  --accent: oklch(0.3 0.03 175);
+  --accent-foreground: oklch(0.9 0.04 165);
+  --destructive: oklch(0.7 0.15 30);
+  --border: oklch(0.31 0.012 210);
+  --input: oklch(0.35 0.012 210);
+  --ring: oklch(0.7 0.08 165);
+  --sidebar: oklch(0.18 0.01 210);
+  --code: oklch(0.17 0.01 210);
+}
+
+/* Density: the whole SDK is sized at 90% of Tailwind defaults (spacing, type, containers).
+   Hosts can rescale by overriding these on .axc-root. / 整体按 Tailwind 默认的 90% 排布，宿主可在 .axc-root 上覆盖。 */
+@theme {
+  --spacing: 0.225rem;
+  --text-xs: 0.675rem;
+  --text-sm: 0.7875rem;
+  --text-base: 0.9rem;
+  --text-lg: 1.0125rem;
+  --text-xl: 1.125rem;
+  --text-2xl: 1.35rem;
+  --container-xs: 18rem;
+  --container-sm: 21.6rem;
+  --container-md: 25.2rem;
+  --container-lg: 28.8rem;
+  --container-xl: 32.4rem;
+  --container-2xl: 37.8rem;
+  --container-3xl: 43.2rem;
+  --container-4xl: 50.4rem;
+  --container-5xl: 57.6rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-code: var(--code);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: var(--axc-font-sans);
+  --font-mono: var(--axc-font-mono);
+}
+
+@layer base {
+  .axc-root {
+    color: var(--foreground);
+    background: var(--background);
+    font-family: var(--axc-font-sans);
+    font-size: 13.5px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    container-type: inline-size;
+    height: 100%;
+    min-height: 0;
+    isolation: isolate;
+    position: relative;
+  }
+  * {
+    border-color: var(--border);
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: color-mix(in oklch, var(--primary) 25%, transparent);
+  }
+}
+
+/* Markdown (Streamdown) reading typography. / 富文本阅读排版。 */
+@layer utilities {
+  .axc-md {
+    overflow-wrap: anywhere;
+    font-size: 14.5px;
+    line-height: 1.75;
+  }
+  .axc-md > :first-child {
+    margin-top: 0;
+  }
+  .axc-md > :last-child {
+    margin-bottom: 0;
+  }
+  .axc-md :where(p, ul, ol, blockquote, pre) {
+    margin: 0 0 0.8em;
+  }
+  .axc-md :where(h1, h2, h3, h4) {
+    margin: 1.3em 0 0.5em;
+    line-height: 1.35;
+    font-weight: 600;
+  }
+  .axc-md h1 {
+    font-size: 1.45em;
+  }
+  .axc-md h2 {
+    font-size: 1.25em;
+  }
+  .axc-md h3 {
+    font-size: 1.1em;
+  }
+  .axc-md :where(ul, ol) {
+    padding-left: 1.4em;
+  }
+  .axc-md ul {
+    list-style: disc;
+  }
+  .axc-md ol {
+    list-style: decimal;
+  }
+  .axc-md li + li {
+    margin-top: 0.2em;
+  }
+  .axc-md hr {
+    margin: 1.4em 0;
+  }
+  .axc-md strong {
+    font-weight: 600;
+  }
+  .axc-md a {
+    color: var(--primary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-thickness: 1px;
+    word-break: break-word;
+  }
+  .axc-md blockquote {
+    border-left: 3px solid var(--border);
+    padding-left: 14px;
+    color: var(--muted-foreground);
+  }
+  .axc-md svg {
+    max-width: 100%;
+  }
+  .axc-md [data-streamdown='code-block-body'] pre {
+    color: var(--sdm-fg, inherit);
+    background: var(--sdm-bg, var(--code));
+    border-radius: 0;
+    max-height: 420px;
+  }
+  .axc-md [data-streamdown='code-block-body'] code > span {
+    display: block;
+    white-space: pre;
+  }
+  .axc-md [data-streamdown='code-block-body'] code > span > span {
+    color: var(--sdm-c, inherit);
+    background: var(--sdm-tbg, transparent);
+  }
+  .dark .axc-md [data-streamdown='code-block-body'] pre {
+    color: var(--shiki-dark-fg, var(--sdm-fg, inherit));
+    background: var(--shiki-dark-bg, var(--code));
+  }
+  .dark .axc-md [data-streamdown='code-block-body'] code > span > span {
+    color: var(--shiki-dark, var(--sdm-c, inherit));
+    background: var(--shiki-dark-bg, var(--sdm-tbg, transparent));
+  }
+  .axc-md [data-streamdown='mermaid'] {
+    max-height: min(70vh, 40rem);
+    overflow: auto;
+  }
+  .dark .axc-md [data-streamdown='mermaid'] > div {
+    background: #f7f8fc;
+    color: #18202d;
+    border-radius: 8px;
+    padding: 8px;
+  }
+  .axc-md [data-streamdown='mermaid'] pre {
+    white-space: pre-wrap;
+  }
+}
