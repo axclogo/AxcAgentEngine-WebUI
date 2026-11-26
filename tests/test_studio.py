@@ -86,11 +86,13 @@ def chat(client, agent_id, text, attachments=(), conv=None):
 
 def test_provider_keys_are_encrypted_masked_and_kept(client, monkeypatch):
     body = {'name': 'OpenAI', 'baseUrl': 'https://api.example.com/v1/', 'apiKey': 'sk-secret-abcd',
-            'models': [{'id': 'gpt-x'}, {'id': 'vis', 'vision': True}, {'id': 'img', 'type': 'image'}]}
+            'models': [{'id': 'gpt-x'}, {'id': 'vis', 'vision': True}, {'id': 'emb', 'type': 'embedding', 'inputPricePer1k': 0.1}]}
     created = client.post('/api/providers', json=body).json()
     assert created['apiKeyMasked'] == 'sk-••••abcd' and created['hasKey'] and 'apiKey' not in created
     assert created['baseUrl'] == 'https://api.example.com/v1'
-    assert created['models'][0] == {'id': 'gpt-x', 'label': '', 'type': 'llm', 'vision': False, 'contextWindow': None}
+    assert created['models'][0] == {'id': 'gpt-x', 'label': '', 'type': 'llm', 'vision': False, 'contextWindow': None,
+                                    'inputPricePer1k': None, 'outputPricePer1k': None}
+    assert created['models'][2]['inputPricePer1k'] == 0.1
     raw = json.dumps(client.host.db.items('provider'))
     assert 'sk-secret-abcd' not in raw
     listed = client.get('/api/providers').json()
@@ -99,7 +101,8 @@ def test_provider_keys_are_encrypted_masked_and_kept(client, monkeypatch):
     assert updated['name'] == '改名' and updated['hasKey'] and updated['apiKeyMasked'] == 'sk-••••abcd'
     assert client.host.providers.api_key(created['id']) == 'sk-secret-abcd'
     for invalid in ({**body, 'baseUrl': 'not a url'}, {**body, 'name': ' '}, {**body, 'models': [{'id': 'a'}, {'id': 'a'}]},
-                    {**body, 'models': [{'id': 'a', 'type': 'video'}]}):
+                    {**body, 'models': [{'id': 'a', 'type': 'video'}]}, {**body, 'models': [{'id': 'a', 'type': 'image'}]},
+                    {**body, 'models': [{'id': 'a', 'inputPricePer1k': -1}]}):
         response = client.post('/api/providers', json=invalid)
         assert response.status_code == 422 and response.json()['error']
 
@@ -314,7 +317,9 @@ def test_eval_run_end_to_end(client):
     assert by_case[passing['id']]['score'] == 10 and by_case[passing['id']]['passed']
     assert '真实引擎' in by_case[passing['id']]['output']
     assert sorted(r['passed'] for r in results) == [False, True]
-    assert set(results[0]) == {'caseId', 'input', 'output', 'tools', 'score', 'passed', 'reason', 'durationMs', 'error'}
+    assert set(results[0]) == {'caseId', 'input', 'output', 'tools', 'score', 'passed', 'reason', 'durationMs', 'error',
+                               'inputTokens', 'outputTokens', 'manualPassed', 'note'}
+    assert results[0]['inputTokens'] > 0 and results[0]['manualPassed'] is None and results[0]['note'] == ''
 
 
 def test_chat_with_text_attachment(client, model):

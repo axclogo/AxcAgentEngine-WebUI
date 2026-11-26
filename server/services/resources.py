@@ -8,24 +8,31 @@ import base64
 from copy import deepcopy
 import json
 from pathlib import Path
+import time
 from axc_agent_engine import Engine
 from axc_agent_engine.core.dispatcher import AgentMessageDispatcher
 from axc_agent_engine.storage.in_memory import InMemoryMessageBus
 from axc_agent_engine.sidecar.multi_agent import MultiAgentSession, SessionMode
 from axc_agent_engine.sidecar.simulation import SIMULATION_MODE_ADAPTERS, AgentPolicyAdapter, AgentProfile
 from ..crypto import SecretBox
-from ..db import Checkpoints, Database, Messages
+from ..db import Checkpoints, Database, KVStore, Messages
 from ..models import LocalScope, configured_model
 from .agents import AgentService, build_registry, plugin_catalog
+from .analytics import AnalyticsService
 from .common import NotFound, now, safe_filename, suffix, uid
 from .evals import EvalService
 from .graphs import GraphServiceHost
+from .interaction import PromptChannel, expire_pending
 from .knowledge import KnowledgeService
+from .mcp import McpService
+from .memories import MemoryService
+from .migrations import migrate
 from .providers import ProviderService
+from .runs import RunLog, ToolFailures
 from .seed import seed as seed_demo
 from .skills import SkillService
 
-CAPS = 'send insert enqueue priority cancelRequest stop resume delete archive upload fork start pause interview report edit'.split()
+CAPS = 'send insert enqueue priority cancelRequest stop resume delete archive upload fork start pause interview report edit respond'.split()
 MAX_ATTACHMENT = 20 * 1024 * 1024
 MAX_ATTACHMENT_TEXT = 100_000
 TEXT_TYPES = ('application/json', 'application/xml', 'application/yaml', 'application/x-yaml', 'application/toml',
@@ -50,23 +57,32 @@ class HostService:
         self.data = Path(data)
         self.data.mkdir(parents=True, exist_ok=True)
         self.db = Database(str(db or self.data / 'workbench.db'))
+        migrate(self.db)
         self.checkpoints = Checkpoints(self.db)
         self.registry = build_registry()
+        self.kv = KVStore(self.db)
+        self.tool_failures = ToolFailures()
         self.engine = Engine(plugin_registry=self.registry, checkpoint_store=self.checkpoints,
-                             message_persistence=Messages(self.db))
+                             message_persistence=Messages(self.db), kv_store=self.kv, audit_sink=self.tool_failures)
         # Shared model override (tests / fixture mode); None resolves each agent's providers.
         # 共享模型覆盖（测试或 fixture 模式）；None 表示按 Agent 解析提供商。
         self.model = model if model is not None else configured_model()
-        self.providers = ProviderService(self.db, SecretBox(self.data))
+        secrets = SecretBox(self.data)
+        self.providers = ProviderService(self.db, secrets)
         self.skills = SkillService(self.db, self.data)
-        self.knowledge = KnowledgeService(self.db, self.data)
+        self.knowledge = KnowledgeService(self.db, self.data, self.providers)
         self.graphs = GraphServiceHost(self.db)
+        self.mcp = McpService(self.db, secrets)
+        self.runs = RunLog(self.db)
         self.agents_svc = AgentService(self.db, self.data, self.registry, self.providers, self.skills,
-                                       self.knowledge, self.graphs)
+                                       self.knowledge, self.graphs, self.mcp, self.runs)
         self.evals = EvalService(self.db, self.agents_svc)
+        self.analytics = AnalyticsService(self.runs, self.providers)
+        self.memories = MemoryService(self.kv)
         self.bus = InMemoryMessageBus()
         self.dispatcher = AgentMessageDispatcher(message_bus=self.bus)
         self.tasks = {}
+        self.channels: dict[str, PromptChannel] = {}
         self.gates = {}
         self.listeners = {}
         self.locks = {}
@@ -76,6 +92,7 @@ class HostService:
                 row['snapshot']['meta']['status'] = 'interrupted' if row['kind'] == 'conversation' else 'failed'
                 row['snapshot']['seq'] += 1
                 self.db.put('resource', key, row)
+            expire_pending(self, key)
         for row in self.evals.items.all():
             if row['status'] == 'running':
                 self.evals.items.put({**row, 'status': 'failed', 'error': '宿主重启，评估已中断'})
@@ -121,6 +138,14 @@ class HostService:
                 await self.dispatcher.stop_consumer(agent_id)
                 await self.agents_svc.unload(self.engine, agent_id)
 
+    async def forget(self, memory_id):
+        """Delete a memory. The memory plugin caches records per scope, so an idle owning agent is unloaded to
+        reload from storage; a busy one keeps its cache until its next rebuild.
+        删除记忆；memory 插件按作用域缓存，空闲的所属 Agent 会被卸载以便重新加载。"""
+        agent_id = await self.memories.delete(memory_id)
+        if agent_id and not self.busy(agent_id):
+            await self.unload_agent(agent_id)
+
     def plugins(self):
         return plugin_catalog(self.registry)
 
@@ -153,7 +178,8 @@ class HostService:
             archive=chat and status not in ('running', 'paused'), fork=chat and not source_block and bool(m['checkpoints']),
             upload=chat and not source_block,
             start=not chat and status == 'idle', pause=not chat and running,
-            interview=not chat, report=not chat, edit=not chat and status == 'idle')
+            interview=not chat, report=not chat, edit=not chat and status == 'idle',
+            respond=any(p['status'] == 'pending' for p in row['snapshot']['prompts']))
         return {k: values.get(k, False) for k in CAPS}
 
     def snapshot(self, kind, ident, scope):
@@ -203,7 +229,7 @@ class HostService:
             capabilities={k: False for k in CAPS}, checkpoints=[], parentId=parent_id, createdAt=now(), archived=False)
         if definition:
             meta['definition'] = definition
-        row = dict(kind=kind, scope=owner, scopeObject=scope, snapshot=dict(seq=0, meta=meta, messages=[], activities=[], queue=[], report=None))
+        row = dict(kind=kind, scope=owner, scopeObject=scope, snapshot=dict(seq=0, meta=meta, messages=[], activities=[], queue=[], prompts=[], report=None))
         self.db.put('resource', self.key(kind, ident), row)
         return self.snapshot(kind, ident, scope)['meta']
 
@@ -219,8 +245,8 @@ class HostService:
         row = self.db.get('resource', key)
         s = row['snapshot']
         s['seq'] += 1
-        if kind in ('message', 'activity', 'queue'):
-            field = {'message': 'messages', 'activity': 'activities', 'queue': 'queue'}[kind]
+        if kind in ('message', 'activity', 'queue', 'prompt'):
+            field = {'message': 'messages', 'activity': 'activities', 'queue': 'queue', 'prompt': 'prompts'}[kind]
             s[field] = sorted([v for v in s[field] if v['id'] != value['id']] + [value], key=lambda v: v['order'])
         else:
             s[kind] = value
@@ -231,6 +257,9 @@ class HostService:
         event = dict(seq=s['seq'], kind=kind, value=deepcopy(value))
         for queue in self.listeners.get(key, set()):
             queue.put_nowait(event)
+        if kind == 'prompt':
+            # capabilities.respond depends on pending prompts; publish the new value. / respond 能力随待处理提示变化，需同步 meta。
+            self.emit(key, 'meta', s['meta'])
         return event
 
     def seed_branch_history(self, parent_session, child_session, messages):
@@ -439,6 +468,12 @@ class HostService:
                 answers.append(f'{self.display(target)}: {answer}')
             event = self.message(key, '\n\n'.join(answers), '采访', kind='interview', ident=c['requestId'], target=c['target'], question=c['question'])
             return {'events': [event]}
+        if action == 'respond':
+            prompt = next((p for p in row['snapshot']['prompts'] if p['id'] == c['promptId']), None)
+            channel = self.channels.get(key)
+            if prompt is None or prompt['status'] != 'pending' or channel is None:
+                raise ValueError('该提示不存在或已处理')
+            return {'events': [await channel.respond(prompt, c.get('approved'), c.get('answer'))]}
         if action == 'generateReport':
             content = render_report(m, row['snapshot']['messages'], self.display)
             return {'events': [self.emit(key, 'report', content)]}
@@ -447,25 +482,47 @@ class HostService:
     async def run_chat(self, key, text, run, attachments=()):
         row = self.db.get('resource', key)
         m = row['snapshot']['meta']
+        agent_row = self.agent_row(m['agentId'])
         actor = self.display(m['agentId'])
         reply = _Reply(self, key, actor)
+        # human_in_the_loop is enabled by runtime.humanInTheLoop; only then does a run get approval queues.
+        # 仅在开启人工交互时为运行提供审批通道。
+        channel = self.channels[key] = PromptChannel(self, key) if agent_row['runtime']['humanInTheLoop'] else None
+        options = channel.run_options() if channel else None
+        task = text if text is not None else next(
+            (x['text'] for x in reversed(row['snapshot']['messages']) if x['role'] == 'user'), '')
+        record = dict(id=run, agentId=m['agentId'], conversationId=m['id'], task=task, success=False, error='',
+                      toolCalls=[], inputTokens=0, outputTokens=0, durationMs=0, model=agent_row['models']['main'] or '',
+                      createdAt=now())
+        started = time.monotonic()
         try:
             agent = await self.agent(m['agentId'])
             if text is None:
-                stream = agent.resume_stream(run)
+                stream = agent.resume_stream(run, run_options=options)
             elif attachments:
                 stream = agent.stream_with_messages([{'role': 'user', 'content': self.content_parts(text, attachments)}],
-                                                    session_id=m['id'], metadata={'run_id': run})
+                                                    session_id=m['id'], metadata={'run_id': run}, run_options=options)
             else:
-                stream = agent.stream(text, session_id=m['id'], metadata={'run_id': run})
+                stream = agent.stream(text, session_id=m['id'], metadata={'run_id': run}, run_options=options)
             async for event in stream:
                 typ = event.type.value
-                if reply.handle(event, typ):
+                tool_error = None
+                if typ == 'cost_update':
+                    # Cumulative for the run (core/llm_caller.py). / 本次运行的累计值。
+                    record['inputTokens'] = event.metadata['input_tokens']
+                    record['outputTokens'] = event.metadata['output_tokens']
+                    reply.usage = {'inputTokens': record['inputTokens'], 'outputTokens': record['outputTokens']}
+                elif typ == 'tool_result':
+                    tool_error = self.tool_failures.pop(m['id'], event.tool_call_id)
+                    record['toolCalls'].append(dict(name=event.tool_name, success=tool_error is None, error=tool_error or ''))
+                if reply.handle(event, typ, tool_error):
                     pass
                 elif typ in ('done', 'cancelled', 'error'):
                     reply.flush()
                     self.meta(key, status={'done': 'completed', 'cancelled': 'cancelled', 'error': 'failed'}[typ])
+                    record['success'] = typ == 'done'
                     if typ == 'error':
+                        record['error'] = str(event.content)
                         self.activity(key, event, 'error', uid(), 'failed')
                 elif typ in ('plan_created', 'step_start', 'step_completed', 'state_change'):
                     kind = 'step' if typ.startswith('step_') else 'plan' if typ == 'plan_created' else 'round'
@@ -486,6 +543,13 @@ class HostService:
             reply.flush()
             self.meta(key, status='failed')
             self.message(key, str(exc), '运行错误', 'system', 'phase')
+            record['success'], record['error'] = False, str(exc)
+        finally:
+            if channel is not None:
+                await channel.close()
+                self.channels.pop(key, None)
+            record['durationMs'] = int((time.monotonic() - started) * 1000)
+            self.runs.record(record)
 
     async def sync_checkpoints(self, key, run, final=False):
         """Record forkable cuts with the transcript and the reply they end on.
@@ -572,7 +636,7 @@ class HostService:
             self.message(key, str(exc), '运行错误', 'system', 'phase')
 
     async def close(self):
-        tasks = [*self.tasks.values(), *self.evals.tasks.values()]
+        tasks = [*self.tasks.values(), *self.evals.tasks.values()]  # Run tasks close their prompt channels.
         for task in tasks:
             if not task.done():
                 task.cancel()
@@ -598,6 +662,7 @@ class _Reply:
         self.text_part = None
         self.thinking_part = None
         self.agent_parts = {}
+        self.usage = None
 
     def _part(self, kind, text='', **extra):
         self.counter += 1
@@ -605,7 +670,8 @@ class _Reply:
         self.parts.append(part)
         return part
 
-    def handle(self, event, typ):
+    def handle(self, event, typ, tool_error=None):
+        """``tool_error``: failure message of a ``tool_result`` (from the audit sink). / 工具失败信息。"""
         if typ == 'stream_start':
             self.text_part = None
         elif typ == 'stream_delta':
@@ -640,7 +706,7 @@ class _Reply:
             ident = f'{self.id}:tool:{event.tool_call_id}'
             part = next((p for p in self.parts if p['id'] == ident), None) or self._part('tool', title=event.tool_name)
             part['text'] = event.content if isinstance(event.content, str) else json.dumps(event.content, ensure_ascii=False, default=str)
-            part['status'] = 'failed' if event.metadata.get('is_error') or event.metadata.get('error') else 'completed'
+            part['status'] = 'failed' if tool_error is not None else 'completed'
             self.emit(True)
         elif typ == 'sub_agent_start':
             name = str(event.metadata.get('agent_name') or event.tool_name or '子 Agent')
@@ -660,7 +726,8 @@ class _Reply:
         if not self.parts:
             return
         text = '\n\n'.join(p['text'] for p in self.parts if p['kind'] == 'text' and p['text'])
-        self.host.message(self.key, text, self.actor, ident=self.id, streaming=streaming, parts=deepcopy(self.parts))
+        self.host.message(self.key, text, self.actor, ident=self.id, streaming=streaming, parts=deepcopy(self.parts),
+                          usage=self.usage)
 
     def flush(self):
         for part in self.parts:

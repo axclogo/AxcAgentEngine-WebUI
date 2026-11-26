@@ -16,7 +16,7 @@ Kind = Literal['conversation', 'simulation']
 
 class CommandBody(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
-    type: Literal['send', 'stop', 'resume', 'fork', 'delete', 'archive', 'unarchive', 'start', 'pause', 'interview', 'generateReport', 'cancelRequest']
+    type: Literal['send', 'stop', 'resume', 'fork', 'delete', 'archive', 'unarchive', 'start', 'pause', 'interview', 'generateReport', 'cancelRequest', 'respond']
     requestId: str | None = None
     text: str | None = None
     attachments: list[dict] = Field(default_factory=list)
@@ -24,9 +24,13 @@ class CommandBody(BaseModel):
     target: str | None = None
     question: str | None = None
     checkpointId: str | None = None
+    promptId: str | None = None
+    approved: bool | None = None
+    answer: str | None = None
 
     def command(self):
-        required = {'send': ['requestId', 'text'], 'interview': ['requestId', 'target', 'question'], 'fork': ['checkpointId'], 'cancelRequest': ['requestId']}
+        required = {'send': ['requestId', 'text'], 'interview': ['requestId', 'target', 'question'], 'fork': ['checkpointId'],
+                    'cancelRequest': ['requestId'], 'respond': ['promptId']}
         value = self.model_dump(exclude_none=True)
         for key in required.get(self.type, []):
             if not value.get(key):

@@ -19,14 +19,19 @@ from axc_agent_engine import AgentModels, Engine, PluginRegistry
 from axc_agent_engine.core.schema import AgentConfig
 from axc_agent_engine.plugins.builtin import AVAILABLE_BUILTIN_PLUGINS
 from axc_agent_engine.plugins.builtin.graph.support import InMemoryGraphStore
-from ..models import FixtureModel, VisionRouter, openai_client
+from axc_agent_engine.plugins.builtin.knowledge.support.retrieval import HashEmbeddingClient
+from ..models import EmbeddingClient, FixtureModel, VisionRouter, openai_client
 from ..schemas import AgentInput
 from .common import Collection, now, uid
 
 STRATEGIES = ('react', 'por')
-MANAGED = ('skill', 'knowledge', 'graph')
+# Plugins enabled and configured by bindings or runtime switches, hidden from the plugin list.
+# 由资源绑定或运行开关托管的插件，不出现在插件列表。
+MANAGED = ('skill', 'knowledge', 'graph', 'human_in_the_loop', 'mcp')
+# MCP tools carry the plugin's ``capability`` config, default '' (no capability), so they need no grant.
+# MCP 工具的能力标签取插件 capability 配置，默认为空，无需授权。
 MANAGED_CAPABILITIES = {'skill': ['skill_read'], 'knowledge': ['knowledge_read'],
-                        'graph': ['graph_read', 'graph_write', 'graph_delete']}
+                        'graph': ['graph_read', 'graph_write', 'graph_delete'], 'human_in_the_loop': ['human_approval']}
 
 
 def build_registry() -> PluginRegistry:
@@ -65,11 +70,12 @@ def _errors(exc: ValidationError, prefix: str = '') -> list[dict]:
 
 
 class AgentService:
-    def __init__(self, db, data: Path, registry: PluginRegistry, providers, skills, knowledge, graphs):
+    def __init__(self, db, data: Path, registry: PluginRegistry, providers, skills, knowledge, graphs, mcp, runs):
         self.items = Collection(db, 'agent', 'Agent')
         self.data = data
         self.registry = registry
         self.providers, self.skills, self.knowledge, self.graphs = providers, skills, knowledge, graphs
+        self.mcp, self.runs = mcp, runs
         self.cache: dict[str, tuple[str, Any, list]] = {}
 
     # ---------- CRUD ----------
@@ -81,7 +87,7 @@ class AgentService:
         return 'ok' if resolved and resolved[1]['type'] == 'llm' else 'missing'
 
     def public(self, row: dict) -> dict:
-        return {**row, 'modelStatus': self.model_status(row)}
+        return {**row, 'modelStatus': self.model_status(row), 'usage': self.runs.usage(row['id'])}
 
     def list(self) -> list[dict]:
         return [self.public(r) for r in self.items.all()]
@@ -92,9 +98,9 @@ class AgentService:
     def save(self, body: AgentInput, ident: str | None = None, fixed_id: str | None = None) -> dict:
         data = body.dump()
         self.items.unique_name(data['name'], ident)
-        unknown = sorted(set(data['plugins']) - set(self.registry.names()))
-        if unknown:
-            raise ValueError(f'未知插件：{", ".join(unknown)}')
+        errors = self.definition_errors(data)
+        if errors:
+            raise ValueError(errors[0]['message'])
         old = self.items.get(ident) if ident else None
         stamp = now()
         row = {**data, 'id': ident or fixed_id or uid(), 'createdAt': old['createdAt'] if old else stamp, 'updatedAt': stamp}
@@ -104,12 +110,22 @@ class AgentService:
         self.items.remove(ident)
         shutil.rmtree(self.data / 'agent-skills' / ident, ignore_errors=True)
 
+    def definition_errors(self, row: dict) -> list[dict]:
+        """Host-side checks the engine cannot make. / 引擎无法校验的宿主侧检查。"""
+        errors = [{'path': 'plugins', 'message': f'未知插件：{p}'} for p in sorted(set(row['plugins']) - set(self.registry.names()))]
+        errors += [{'path': 'bindings.mcp', 'message': f'MCP 服务不存在：{i}'} for i in row['bindings']['mcp']
+                   if self.mcp.items.find(i) is None]
+        # The knowledge plugin mounts one embedding client per agent. / 知识库插件每个 Agent 只挂载一个向量模型。
+        if len(self.knowledge.embedding_models(row['bindings']['knowledge'])) > 1:
+            errors.append({'path': 'bindings.knowledge', 'message': '绑定的知识库必须使用同一个向量模型（或都不使用）'})
+        return errors
     # ---------- agent.yaml ----------
-    def render(self, row: dict, name: str, skill_dir: Path) -> dict:
-        """AgentInput document -> engine AgentConfig dict. / 转换为引擎 YAML 结构。"""
+    def render(self, row: dict, name: str, skill_dir: Path, secrets: bool = False) -> dict:
+        """AgentInput document -> engine AgentConfig dict; MCP secrets are masked unless ``secrets``.
+        转换为引擎 YAML 结构；除非 secrets=True，MCP 密钥以掩码呈现。"""
         rt = row['runtime']
         runtime = {'strategy': row['strategy'], 'max_rounds': rt['maxRounds'], 'thinking': rt['thinking'],
-                   'parallel_tool_calls': rt['parallelToolCalls'], 'human_in_the_loop': rt['humanInTheLoop']}
+                   'parallel_tool_calls': rt['parallelToolCalls']}
         for key, field in (('stream_idle_timeout', 'streamIdleTimeout'), ('step_timeout', 'stepTimeout'),
                            ('total_timeout', 'totalTimeout')):
             if rt[field] is not None:
@@ -128,6 +144,13 @@ class AgentService:
             plugins['knowledge'] = {**settings.get('knowledge', {}).get('config', {}), 'enabled': True, 'sources': sources}
         if self._bound_graph(row):
             plugins['graph'] = {**settings.get('graph', {}).get('config', {}), 'enabled': True, 'sources': []}
+        # The engine ignores runtime.human_in_the_loop; the switch enables the plugin with its defaults.
+        # 引擎不读取 runtime.human_in_the_loop，开关改为以默认配置启用插件（含 ask_human）。
+        if rt['humanInTheLoop']:
+            plugins['human_in_the_loop'] = {'enabled': True, 'ask_human': True}
+        servers = self._mcp_servers(row, secrets)
+        if servers:
+            plugins['mcp'] = {'enabled': True, 'servers': servers}
         # The engine denies capability-tagged tools unless allowed; grant what bound resources need.
         # 引擎默认拒绝带能力标签的工具，这里为已绑定资源授予所需能力（不含 shell）。
         capabilities = [c for plugin, caps in MANAGED_CAPABILITIES.items() if plugin in plugins for c in caps]
@@ -141,6 +164,9 @@ class AgentService:
     def _bound_skills(self, row: dict) -> list[dict]:
         return [s for i in row['bindings']['skills'] if (s := self.skills.items.find(i)) and s['enabled']]
 
+    def _mcp_servers(self, row: dict, secrets: bool) -> list[dict]:
+        rows = [m for i in row['bindings']['mcp'] if (m := self.mcp.items.find(i)) and m['enabled']]
+        return [self.mcp.engine_config(m, secrets) for m in rows]
     def _bound_graph(self, row: dict) -> str | None:
         graph = self.graphs.items.find(row['bindings']['graph']) if row['bindings']['graph'] else None
         return graph['id'] if graph and graph['enabled'] else None
@@ -165,7 +191,7 @@ class AgentService:
         except ValidationError as exc:
             return {'ok': False, 'errors': _errors(exc), 'yaml': ''}
         row = {**body.dump(), 'id': 'validate'}
-        errors = [{'path': 'plugins', 'message': f'未知插件：{p}'} for p in sorted(set(row['plugins']) - set(self.registry.names()))]
+        errors = self.definition_errors(row)
         with tempfile.TemporaryDirectory() as tmp:
             skill_dir = Path(tmp) / 'skills'
             self.link_skills(row, skill_dir)
@@ -181,8 +207,10 @@ class AgentService:
             path.write_text(yaml.safe_dump({**config, 'name': 'validate'}, allow_unicode=True), encoding='utf-8')
             engine = Engine(plugin_registry=self.registry)
             try:
-                engine.load_agent_template(str(path)).instantiate(
-                    models=AgentModels(default=FixtureModel()), mounts={'graph.store': InMemoryGraphStore()})
+                mounts = {'graph.store': InMemoryGraphStore()}
+                if self.knowledge.embedding_models(row['bindings']['knowledge']) - {None}:
+                    mounts['knowledge.embedding'] = HashEmbeddingClient()
+                engine.load_agent_template(str(path)).instantiate(models=AgentModels(default=FixtureModel()), mounts=mounts)
             except Exception as exc:  # Engine plugin init errors carry the reason. / 插件初始化错误。
                 return {'ok': False, 'errors': [{'path': 'plugins', 'message': str(exc)}], 'yaml': text}
             finally:
@@ -195,7 +223,8 @@ class AgentService:
                    [(s['id'], s['updatedAt']) for s in self._bound_skills(row)],
                    [(k['id'], k['updatedAt'], k['enabled']) for i in row['bindings']['knowledge'] if (k := self.knowledge.items.find(i))],
                    self.graphs.items.find(row['bindings']['graph'] or '') or {},
-                   [(p['id'], p['updatedAt']) for p in self.providers.items.all()]]
+                   [(p['id'], p['updatedAt']) for p in self.providers.items.all()],
+                   [(m['id'], m['updatedAt']) for i in row['bindings']['mcp'] if (m := self.mcp.items.find(i))]]
         return hashlib.sha256(json.dumps(related, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
     def _models(self, row: dict, override) -> tuple[AgentModels, list]:
@@ -218,6 +247,20 @@ class AgentService:
         utility = self.providers.resolve(row['models']['utility'])
         utility = client(utility) if utility and utility[1]['type'] == 'llm' else None
         return AgentModels(default=default, utility=utility), clients
+    def _embedding(self, row: dict, override, clients: list):
+        """``knowledge.embedding`` mount: engine hash embedding in fixture mode. / 向量模型挂载。"""
+        refs = self.knowledge.embedding_models(row['bindings']['knowledge']) - {None}
+        if not refs:
+            return None
+        if override is not None:
+            return HashEmbeddingClient()
+        resolved = self.providers.resolve(next(iter(refs)))
+        if not resolved or resolved[1]['type'] != 'embedding':
+            raise ValueError('知识库的向量模型不可用')
+        provider, entry, key = resolved
+        client = EmbeddingClient(provider['baseUrl'], key, entry['id'])
+        clients.append(client)
+        return client
 
     def judge_model(self, ident: str, override):
         """Utility model, else main; None in fixture mode. / 裁判模型。"""
@@ -245,11 +288,17 @@ class AgentService:
         agents = self.data / 'agents'
         agents.mkdir(parents=True, exist_ok=True)
         path = agents / f'{ident}.yaml'
+        # agent.yaml on disk keeps MCP secrets masked; real values go in as overrides. / 磁盘上的 YAML 不含 MCP 密钥。
         path.write_text(yaml.safe_dump(self.render(row, ident, folder), allow_unicode=True, sort_keys=False), encoding='utf-8')
+        servers = self._mcp_servers(row, secrets=True)
         graph = self._bound_graph(row)
-        mounts = {'graph.store': self.graphs.store(graph)} if graph else None
+        mounts = {'graph.store': self.graphs.store(graph)} if graph else {}
         try:
-            agent = engine.load_agent_template(str(path)).instantiate(models=models, mounts=mounts)
+            embedding = self._embedding(row, override, clients)
+            if embedding is not None:
+                mounts['knowledge.embedding'] = embedding
+            agent = engine.load_agent_template(str(path)).instantiate(
+                models=models, mounts=mounts, overrides={'plugins.mcp.servers': servers} if servers else None)
         except Exception:
             for c in clients:
                 await c.close()

@@ -50,7 +50,23 @@ export interface StudioClient extends Host {
     removeCase(id: string, caseId: string): Promise<void>;
     run(id: string): Promise<s.EvalTask>;
     results(id: string, signal?: AbortSignal): Promise<s.EvalResult[]>;
+    review(id: string, caseId: string, review: s.EvalReview): Promise<s.EvalResult>;
+    reportUrl(id: string): string;
   };
+  mcp: Crud<s.McpServer, s.McpInput> & { test(id: string): Promise<s.McpTest> };
+  memories: {
+    list(agentId?: string, signal?: AbortSignal): Promise<s.Memory[]>;
+    remove(id: string): Promise<void>;
+  };
+  analytics: {
+    failures(query: AnalyticsQuery, signal?: AbortSignal): Promise<s.FailureReport>;
+    distill(query: AnalyticsQuery, signal?: AbortSignal): Promise<s.DistillReport>;
+    cost(query: AnalyticsQuery, signal?: AbortSignal): Promise<s.CostReport>;
+  };
+}
+export interface AnalyticsQuery {
+  agentId?: string;
+  days: number;
 }
 
 export class HttpError extends Error {
@@ -144,6 +160,8 @@ export function createHttpClient(options: HttpClientOptions = {}): StudioClient 
     };
   }
   const enc = encodeURIComponent;
+  const analyticsQuery = (q: AnalyticsQuery) =>
+    new URLSearchParams({ days: String(q.days), ...(q.agentId ? { agentId: q.agentId } : {}) }).toString();
   const scopeQuery = (scope: Scope) => enc(JSON.stringify(scope));
   const resourcePath = (r: Resource) => `/${r.kind}/${enc(r.id)}?scope=${scopeQuery(r.scope)}`;
   return {
@@ -231,6 +249,32 @@ export function createHttpClient(options: HttpClientOptions = {}): StudioClient 
       run: (id) => call('POST', `/evals/${enc(id)}/run`, s.evalSchema, {}),
       results: (id, signal) =>
         call('GET', `/evals/${enc(id)}/results`, z.array(s.evalResultSchema), undefined, signal),
+      review: (id, caseId, review) =>
+        call('PUT', `/evals/${enc(id)}/results/${enc(caseId)}`, s.evalResultSchema, review),
+      reportUrl: (id) => `${base}/evals/${enc(id)}/report`,
+    },
+    mcp: {
+      ...crud('/mcp', s.mcpSchema),
+      test: (id) => call('POST', `/mcp/${enc(id)}/test`, s.mcpTestSchema, {}),
+    },
+    memories: {
+      list: (agentId, signal) =>
+        call(
+          'GET',
+          `/memories${agentId ? `?agentId=${enc(agentId)}` : ''}`,
+          z.array(s.memorySchema),
+          undefined,
+          signal,
+        ),
+      remove: (id) => call('DELETE', `/memories/${enc(id)}`, null),
+    },
+    analytics: {
+      failures: (q, signal) =>
+        call('GET', `/analytics/failures?${analyticsQuery(q)}`, s.failureReportSchema, undefined, signal),
+      distill: (q, signal) =>
+        call('GET', `/analytics/distill?${analyticsQuery(q)}`, s.distillReportSchema, undefined, signal),
+      cost: (q, signal) =>
+        call('GET', `/analytics/cost?${analyticsQuery(q)}`, s.costReportSchema, undefined, signal),
     },
   };
 }

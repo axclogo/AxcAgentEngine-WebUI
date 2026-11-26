@@ -5,7 +5,7 @@ export type { AgentStudioProps, SectionId } from './studio';
 export { StudioProvider, useStudio } from './provider';
 export type { StudioProviderProps, StudioConfig, Theme } from './provider';
 export { createHttpClient, HttpError } from './client';
-export type { StudioClient, Crud, HttpClientOptions } from './client';
+export type { StudioClient, Crud, HttpClientOptions, AnalyticsQuery } from './client';
 export { Workbench } from './workbench';
 export type { WorkbenchProps } from './workbench';
 export { SimulationDetail, SimulationManager, SimulationForm } from './simulation-view';
@@ -18,6 +18,9 @@ export { GraphManager } from './studio/graphs';
 export { ToolCatalog } from './studio/tools';
 export { EvalManager } from './studio/evals';
 export { ArchiveManager } from './studio/archive';
+export { AnalyticsManager } from './studio/analytics';
+export { McpManager } from './studio/mcp';
+export { MemoryManager } from './studio/memory';
 export { NavContext } from './studio/nav';
 export type { NavTarget } from './studio/nav';
 export { Markdown, SafeLink } from './markdown';
@@ -35,6 +38,7 @@ export type {
   Snapshot,
   ResourceEvent,
   Attachment,
+  Prompt,
   SimulationDefinition,
   Mode,
 } from './core';

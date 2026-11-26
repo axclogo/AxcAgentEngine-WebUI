@@ -8,6 +8,9 @@ import {
   MessagesSquare,
   Moon,
   Archive,
+  BarChart3,
+  Plug,
+  Brain,
   Puzzle,
   Share2,
   Sparkles,
@@ -26,6 +29,9 @@ import { GraphManager } from './studio/graphs';
 import { ToolCatalog } from './studio/tools';
 import { EvalManager } from './studio/evals';
 import { ArchiveManager } from './studio/archive';
+import { AnalyticsManager } from './studio/analytics';
+import { McpManager } from './studio/mcp';
+import { MemoryManager } from './studio/memory';
 import { SimulationManager } from './simulation-view';
 import type { Scope } from './core';
 import { cn } from './lib/utils';
@@ -42,11 +48,14 @@ const SECTIONS: {
   { id: 'archive', label: '归档', icon: Archive, group: '工作' },
   { id: 'simulation', label: '推演', icon: MessagesSquare, group: '工作' },
   { id: 'evals', label: '评估', icon: ClipboardCheck, group: '工作' },
+  { id: 'analytics', label: '分析', icon: BarChart3, group: '工作' },
   { id: 'agents', label: 'Agent', icon: Bot, group: '配置' },
   { id: 'models', label: '模型', icon: Cpu, group: '配置' },
   { id: 'skills', label: 'Skills', icon: Sparkles, group: '资源' },
   { id: 'knowledge', label: '知识库', icon: BookOpen, group: '资源' },
   { id: 'graphs', label: '图谱', icon: Share2, group: '资源' },
+  { id: 'mcp', label: 'MCP 服务', icon: Plug, group: '资源' },
+  { id: 'memory', label: '记忆', icon: Brain, group: '资源' },
   { id: 'tools', label: '工具目录', icon: Puzzle, group: '资源' },
 ];
 
@@ -124,6 +133,12 @@ export function AgentStudio({
         return <KnowledgeManager />;
       case 'graphs':
         return <GraphManager key={k} initialId={current.id} />;
+      case 'analytics':
+        return <AnalyticsManager />;
+      case 'mcp':
+        return <McpManager />;
+      case 'memory':
+        return <MemoryManager />;
       case 'tools':
         return <ToolCatalog />;
     }

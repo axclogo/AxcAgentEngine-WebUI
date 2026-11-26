@@ -3,9 +3,10 @@
 Python attributes are snake_case; ``dump()`` returns the camelCase JSON document stored and served.
 Unknown keys are dropped like zod's default object parsing.
 """
+import re
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -32,9 +33,11 @@ class Input(BaseModel):
 class ModelEntry(Input):
     id: Annotated[str, _non_empty('模型 ID 不能为空')]
     label: str = ''
-    type: Literal['llm', 'embedding', 'image'] = 'llm'
+    type: Literal['llm', 'embedding'] = 'llm'
     vision: bool = False
     context_window: int | None = Field(default=None, gt=0)
+    input_price_per1k: float | None = Field(default=None, ge=0, alias='inputPricePer1k')
+    output_price_per1k: float | None = Field(default=None, ge=0, alias='outputPricePer1k')
 
 
 class ProviderInput(Input):
@@ -83,10 +86,11 @@ class RuntimeInput(Input):
 
 
 class ModelsInput(Input):
+    # Fixed slot set: a removed slot such as ``image`` is an error, not silently dropped. / 槽位固定，未知槽位报错。
+    model_config = ConfigDict(extra='forbid')
     main: str | None = None
     utility: str | None = None
     vision: str | None = None
-    image: str | None = None
 
 
 class PluginSetting(Input):
@@ -98,6 +102,7 @@ class BindingsInput(Input):
     skills: list[str] = []
     knowledge: list[str] = []
     graph: str | None = None
+    mcp: list[str] = []
 
 
 class AgentInput(Input):
@@ -128,6 +133,7 @@ class KnowledgeInput(Input):
     name: Name
     description: str = ''
     enabled: bool = True
+    embedding_model: str | None = None
 
 
 class TextDocumentInput(Input):
@@ -169,3 +175,24 @@ class EvalCaseInput(Input):
     input: Annotated[str, _non_empty('输入不能为空')]
     expected_output: str = ''
     expected_tools: list[str] = []
+class EvalReview(Input):
+    manual_passed: bool | None
+    note: str = ''
+# ---------- MCP servers ----------
+class McpInput(Input):
+    name: Annotated[str, _non_empty('名称不能为空'), Field(pattern=r'^[A-Za-z][\w-]*$')]
+    description: str = ''
+    enabled: bool = True
+    transport: Literal['stdio', 'http']
+    command: str = ''
+    args: list[str] = []
+    env: dict[str, str] = {}
+    url: str = ''
+    headers: dict[str, str] = {}
+    @model_validator(mode='after')
+    def transport_fields(self):
+        if self.transport == 'stdio' and not self.command.strip():
+            raise ValueError('stdio 需要启动命令')
+        if self.transport == 'http' and not re.match(r'^https?://', self.url):
+            raise ValueError('请输入 http(s) 地址')
+        return self

@@ -38,8 +38,18 @@ import {
   FileText,
   PanelLeft,
   Users,
+  ShieldAlert,
+  MessageCircleQuestion,
 } from 'lucide-react';
-import { type Scope, type Meta, type Message, type MessagePart, type Command, resourceKey } from './core';
+import {
+  type Scope,
+  type Meta,
+  type Message,
+  type MessagePart,
+  type Command,
+  type Prompt,
+  resourceKey,
+} from './core';
 import { useResource, errorText } from './state';
 import { Markdown } from './markdown';
 import { attachmentBridge } from './attachments';
@@ -63,8 +73,8 @@ import {
   CollapsibleTrigger,
   Confirm,
 } from './ui/overlay';
-import { keys, formatTime } from './studio/page';
-import { AgentEditor, blankAgent } from './studio/agents';
+import { keys, formatTime, formatTokens } from './studio/page';
+import { AgentEditor, agentToInput, blankAgent } from './studio/agents';
 import type { Agent } from './studio/schema';
 
 export interface WorkbenchProps {
@@ -342,11 +352,7 @@ function WorkbenchScope({
         {editor && (
           <AgentEditor
             agent={editor.agent}
-            initial={
-              editor.agent
-                ? (({ id: _i, modelStatus: _m, createdAt: _c, updatedAt: _u, ...r }) => r)(editor.agent)
-                : blankAgent
-            }
+            initial={editor.agent ? agentToInput(editor.agent) : blankAgent}
             onDone={(saved) => {
               setEditor(undefined);
               void qc.invalidateQueries({ queryKey: ['catalog'] });
@@ -570,6 +576,13 @@ function ChatMessage() {
       {!m.streaming && m.role === 'assistant' && (
         <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
           <CopyButton text={m.text} />
+          {m.usage && (
+            <Tip content="这次运行的输入 / 输出 token">
+              <span className="px-1.5 text-[11px] text-muted-foreground tabular-nums">
+                {formatTokens(m.usage.inputTokens)} / {formatTokens(m.usage.outputTokens)} tokens
+              </span>
+            </Tip>
+          )}
           {p.canFork && checkpoint && (
             <Tip content="从这条回复之后开一个分支，原会话保持不变">
               <Button
@@ -970,6 +983,16 @@ function Conversation({
                     {error || sendError}
                   </p>
                 )}
+                {s.prompts
+                  .filter((p) => p.status === 'pending')
+                  .map((p) => (
+                    <PromptCard
+                      key={p.id}
+                      prompt={p}
+                      busy={busy || !c?.respond}
+                      onRespond={(r) => act({ type: 'respond', promptId: p.id, ...r })}
+                    />
+                  ))}
                 {s.queue.length > 0 && (
                   <ul
                     className="mb-2 flex max-h-32 flex-col gap-1 overflow-auto rounded-lg border bg-card p-1.5 text-sm"
@@ -1218,5 +1241,96 @@ function ForkPicker({
         ))}
       </ul>
     </DialogContent>
+  );
+}
+
+/**
+ * A pending engine interaction: approve a risky tool call, or answer an ask_human question.
+ * The run is paused on the server until this is answered or the run ends.
+ * 待处理的人工交互：审批高风险工具，或回答 ask_human 提问；回答前运行在服务端暂停。
+ */
+function PromptCard({
+  prompt: p,
+  busy,
+  onRespond,
+}: {
+  prompt: Prompt;
+  busy: boolean;
+  onRespond: (r: { approved?: boolean; answer?: string }) => void;
+}) {
+  const [answer, setAnswer] = React.useState('');
+  if (p.kind === 'approval')
+    return (
+      <section
+        aria-label="工具审批"
+        className="mb-2 rounded-xl border border-amber-500/40 bg-amber-500/5 p-3 text-sm"
+      >
+        <header className="flex items-center gap-2 font-medium">
+          <ShieldAlert className="size-4 text-amber-600 dark:text-amber-400" />
+          Agent 想调用工具 <code className="font-mono">{p.toolName}</code>
+          {p.riskLevel && (
+            <Badge variant="warning" className="font-normal">
+              风险：{p.riskLevel}
+            </Badge>
+          )}
+        </header>
+        {p.arguments && Object.keys(p.arguments).length > 0 && (
+          <pre className="mt-2 max-h-40 overflow-auto rounded-md bg-code p-2 font-mono text-[11px] leading-relaxed">
+            {JSON.stringify(p.arguments, null, 2)}
+          </pre>
+        )}
+        <div className="mt-2.5 flex justify-end gap-2">
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => onRespond({ approved: false })}>
+            拒绝
+          </Button>
+          <Button size="sm" disabled={busy} onClick={() => onRespond({ approved: true })}>
+            允许
+          </Button>
+        </div>
+      </section>
+    );
+  return (
+    <section
+      aria-label="Agent 提问"
+      className="mb-2 rounded-xl border border-primary/40 bg-accent/30 p-3 text-sm"
+    >
+      <header className="flex items-start gap-2">
+        <MessageCircleQuestion className="mt-0.5 size-4 shrink-0 text-primary" />
+        <p className="font-medium whitespace-pre-wrap">{p.question}</p>
+      </header>
+      {!!p.options?.length && (
+        <div className="mt-2 flex flex-wrap gap-1.5 pl-6">
+          {p.options.map((o) => (
+            <Button
+              key={o}
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={() => onRespond({ answer: o })}
+            >
+              {o}
+            </Button>
+          ))}
+        </div>
+      )}
+      <form
+        className="mt-2 flex gap-2 pl-6"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (answer.trim()) onRespond({ answer: answer.trim() });
+        }}
+      >
+        <input
+          aria-label="回答"
+          value={answer}
+          onChange={(e) => setAnswer(e.target.value)}
+          placeholder={p.options?.length ? '或输入其他回答' : '输入回答'}
+          className="h-8 min-w-0 flex-1 rounded-md border border-input bg-card px-2.5 text-[13px] outline-none focus-visible:border-ring"
+        />
+        <Button type="submit" size="sm" disabled={busy || !answer.trim()}>
+          回答
+        </Button>
+      </form>
+    </section>
   );
 }

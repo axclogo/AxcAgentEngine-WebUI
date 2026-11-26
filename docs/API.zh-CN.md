@@ -116,3 +116,60 @@ Agent 名称唯一。宿主以 Agent ID 作为引擎内名称，定义变更后�
 - `Meta.capabilities.archive`：任何未运行的可见会话都可归档。
 - `fork` 命令：`checkpointId` 必须来自该会话的 `meta.checkpoints`；可以是任意一次运行的切点。分支会话写入截至该切点的对话历史。
 - `Message.parts`：宿主把 `thinking_*`、`tool_call/tool_result`、`sub_agent_*` 事件归并到助手消息的分段中（kind=thinking/tool/agent），工具结果为 JSON 时原样放在 text。
+
+## 人工交互（审批与提问）
+
+Agent 运行参数 `runtime.humanInTheLoop=true` 时，宿主为该 Agent 启用引擎 `human_in_the_loop` 插件（含 `ask_human` 工具），并在每次运行时提供审批通道（`run_options.approval_queue/response_queue`）。该插件由此开关托管，不出现在插件列表。
+
+- 快照新增 `prompts: Prompt[]`，事件新增 `kind: 'prompt'`（同 id upsert）。
+  - `approval`：工具风险达到阈值时触发，带 `toolName/arguments/riskLevel`。
+  - `question`：模型调用 `ask_human`，带 `question/options`。
+- 命令 `{type:'respond', promptId, approved?, answer?}`：approval 用 `approved`，question 用 `answer`。只能回答 `pending` 的提示，回答后 `status='answered'`、`answer` 为回答值。能力位 `capabilities.respond` 在存在待处理提示时为 true。
+- 运行结束（完成 / 停止 / 失败）或宿主重启时，未回答的提示变为 `expired`。
+
+## Token 用量
+
+- 助手消息 `Message.usage = {inputTokens, outputTokens}`：生成该回复的那次运行的累计用量（引擎 `cost_update` 事件）。
+- `Agent.usage = {inputTokens, outputTokens, runs}`：该 Agent 全部对话运行的累计值。
+- 宿主对 OpenAI 兼容服务的流式请求带 `stream_options.include_usage=true`。
+
+## 向量检索
+
+- 知识库 `embeddingModel: ModelRef | null`（`type=embedding` 的模型）。Agent 绑定的知识库若配置了向量模型，宿主把该模型挂载为引擎 `knowledge.embedding`，检索变为向量 + BM25 混合；未配置则仅 BM25。
+- 同一个 Agent 绑定的知识库必须使用同一个向量模型（或都不使用），否则 Agent 校验与保存返回错误。
+- 模型类型只剩 `llm`、`embedding`；Agent 模型槽位只剩 `main/utility/vision`。
+
+## MCP 服务 `/api/mcp`
+
+| 方法           | 路径                 | 说明                                                                     |
+| -------------- | -------------------- | ------------------------------------------------------------------------ |
+| GET/POST       | `/api/mcp`           | `McpServer[]` / 新建（body `McpInput`）                                  |
+| GET/PUT/DELETE | `/api/mcp/{id}`      | 更新时 `env`、`headers` 中值为空字符串的键保留原值；不在 body 中的键删除 |
+| POST           | `/api/mcp/{id}/test` | 连接并列出工具 → `McpTest`                                               |
+
+`env`、`headers` 的值加密保存，响应只返回键名。Agent `bindings.mcp` 绑定 MCP 服务后，宿主启用引擎 `mcp` 插件并写入这些服务；`mcp` 插件由绑定托管，不出现在插件列表。
+
+## 记忆 `/api/memories`
+
+宿主为引擎提供持久化 KV 存储，引擎 `memory` 插件写入的记忆可在这里查看和删除。
+
+| 方法   | 路径                     | 说明                        |
+| ------ | ------------------------ | --------------------------- |
+| GET    | `/api/memories?agentId=` | `Memory[]`，可按 Agent 过滤 |
+| DELETE | `/api/memories/{id}`     | 删除一条记忆                |
+
+## 分析 `/api/analytics`
+
+数据来自宿主记录的每次对话运行（Agent、任务文本、工具调用及成败、错误、token、耗时、模型），由引擎旁路模块生成报告。查询参数 `agentId`（可选）、`days`（默认 30）。
+
+| 方法 | 路径                      | 说明                                                                                |
+| ---- | ------------------------- | ----------------------------------------------------------------------------------- |
+| GET  | `/api/analytics/failures` | `FailureReport`（`failure_miner`）                                                  |
+| GET  | `/api/analytics/distill`  | `DistillReport`（`distiller`）                                                      |
+| GET  | `/api/analytics/cost`     | `CostReport`（`cost_optimizer`，价格来自模型的 `inputPricePer1k/outputPricePer1k`） |
+
+## 评估：人工标注与报告
+
+- `EvalResult` 新增 `inputTokens/outputTokens/manualPassed/note`。任务的通过率按 `manualPassed ?? passed` 计算。
+- `PUT /api/evals/{id}/results/{caseId}`，body `EvalReview` → `EvalResult`。
+- `GET /api/evals/{id}/report` → `text/markdown` 附件：汇总（引擎 `generate_report`）、逐条结果、人工标注。

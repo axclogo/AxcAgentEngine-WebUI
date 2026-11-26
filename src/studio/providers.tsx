@@ -318,7 +318,15 @@ function ProviderEditor({ provider, onDone }: { provider: Provider | null; onDon
                   remote
                     .filter((m) => !existing.has(m))
                     .forEach((m) =>
-                      models.append({ id: m, label: '', type: 'llm', vision: false, contextWindow: null }),
+                      models.append({
+                        id: m,
+                        label: '',
+                        type: 'llm',
+                        vision: false,
+                        contextWindow: null,
+                        inputPricePer1k: null,
+                        outputPricePer1k: null,
+                      }),
                     )
                 }
               >
@@ -332,7 +340,15 @@ function ProviderEditor({ provider, onDone }: { provider: Provider | null; onDon
                   type="button"
                   disabled={existing.has(m)}
                   onClick={() =>
-                    models.append({ id: m, label: '', type: 'llm', vision: false, contextWindow: null })
+                    models.append({
+                      id: m,
+                      label: '',
+                      type: 'llm',
+                      vision: false,
+                      contextWindow: null,
+                      inputPricePer1k: null,
+                      outputPricePer1k: null,
+                    })
                   }
                   className="cursor-pointer rounded-md border bg-card px-2 py-0.5 font-mono text-xs hover:border-primary disabled:cursor-default disabled:opacity-40"
                 >
@@ -349,7 +365,15 @@ function ProviderEditor({ provider, onDone }: { provider: Provider | null; onDon
               variant="outline"
               size="sm"
               onClick={() =>
-                models.append({ id: '', label: '', type: 'llm', vision: false, contextWindow: null })
+                models.append({
+                  id: '',
+                  label: '',
+                  type: 'llm',
+                  vision: false,
+                  contextWindow: null,
+                  inputPricePer1k: null,
+                  outputPricePer1k: null,
+                })
               }
             >
               <Plus />
@@ -362,17 +386,19 @@ function ProviderEditor({ provider, onDone }: { provider: Provider | null; onDon
             </p>
           ) : (
             <div className="overflow-hidden rounded-lg border">
-              <div className="grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_7rem_4.5rem_2rem] gap-2 border-b bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground">
+              <div className="grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_6rem_3.5rem_5rem_5rem_2rem] gap-2 border-b bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground">
                 <span>模型 ID</span>
                 <span>显示名</span>
                 <span>类型</span>
                 <span>视觉</span>
+                <span title="每千 token，用于成本分析">输入价/千</span>
+                <span title="每千 token，用于成本分析">输出价/千</span>
                 <span />
               </div>
               {models.fields.map((f, i) => (
                 <div
                   key={f.id}
-                  className="grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_7rem_4.5rem_2rem] items-center gap-2 border-b px-3 py-1.5 last:border-0"
+                  className="grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_6rem_3.5rem_5rem_5rem_2rem] items-center gap-2 border-b px-3 py-1.5 last:border-0"
                 >
                   <Input
                     aria-label={`模型 ${i + 1} ID`}
@@ -394,7 +420,6 @@ function ProviderEditor({ provider, onDone }: { provider: Provider | null; onDon
                   >
                     <option value="llm">对话</option>
                     <option value="embedding">向量</option>
-                    <option value="image">图片生成</option>
                   </NativeSelect>
                   <Controller
                     control={form.control}
@@ -406,6 +431,28 @@ function ProviderEditor({ provider, onDone }: { provider: Provider | null; onDon
                         onCheckedChange={(v) => field.onChange(v === true)}
                       />
                     )}
+                  />
+                  <Input
+                    aria-label={`模型 ${i + 1} 输入价`}
+                    className="h-8 text-[12px]"
+                    type="number"
+                    min={0}
+                    step="any"
+                    placeholder="—"
+                    {...form.register(`models.${i}.inputPricePer1k`, {
+                      setValueAs: (v) => (v === '' || v === null ? null : Number(v)),
+                    })}
+                  />
+                  <Input
+                    aria-label={`模型 ${i + 1} 输出价`}
+                    className="h-8 text-[12px]"
+                    type="number"
+                    min={0}
+                    step="any"
+                    placeholder="—"
+                    {...form.register(`models.${i}.outputPricePer1k`, {
+                      setValueAs: (v) => (v === '' || v === null ? null : Number(v)),
+                    })}
                   />
                   <Button
                     variant="ghost"

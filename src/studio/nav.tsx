@@ -15,7 +15,10 @@ export type SectionId =
   | 'graphs'
   | 'tools'
   | 'simulation'
-  | 'evals';
+  | 'evals'
+  | 'analytics'
+  | 'mcp'
+  | 'memory';
 export interface NavTarget {
   section: SectionId;
   /** e.g. agentId for chat, graph id for graphs */
@@ -25,7 +28,8 @@ export interface NavTarget {
 export const NavContext = React.createContext<((t: NavTarget) => void) | null>(null);
 export const useNavigate = () => React.useContext(NavContext);
 
-export type ModelSlot = 'main' | 'utility' | 'vision' | 'image';
+/** Agent model slots plus the knowledge-base embedding picker. / Agent 模型槽位与知识库向量模型。 */
+export type ModelSlot = 'main' | 'utility' | 'vision' | 'embedding';
 /** Provider → model cascade groups filtered for a slot. / 按槽位过滤的提供商→模型级联选项。 */
 export function modelGroups(providers: Provider[], slot: ModelSlot): ComboGroup[] {
   return providers
@@ -34,7 +38,7 @@ export function modelGroups(providers: Provider[], slot: ModelSlot): ComboGroup[
       label: p.name,
       options: p.models
         .filter((m) =>
-          slot === 'image' ? m.type === 'image' : m.type === 'llm' && (slot !== 'vision' || m.vision),
+          slot === 'embedding' ? m.type === 'embedding' : m.type === 'llm' && (slot !== 'vision' || m.vision),
         )
         .map((m) => ({
           value: `${p.id}:${m.id}`,

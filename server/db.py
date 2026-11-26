@@ -78,3 +78,16 @@ class Messages:
         for key, _ in self.db.items('history'):
             if json.loads(key)[0] == scope_id:
                 self.db.remove('history', key)
+class KVStore:
+    """Engine ``KVStore`` (storage/protocols.py) over the ``kv`` bucket; backs the memory plugin.
+    引擎 KVStore 协议的 SQLite 实现，供 memory 插件持久化。"""
+    def __init__(self, db):
+        self.db = db
+    async def get(self, key):
+        return self.db.get('kv', key)
+    async def set(self, key, value):
+        self.db.put('kv', key, value)
+    async def delete(self, key):
+        self.db.remove('kv', key)
+    async def list_keys(self, prefix=''):
+        return sorted(k for k, _ in self.db.items('kv') if k.startswith(prefix))

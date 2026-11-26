@@ -4,6 +4,7 @@ import { Controller, useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import {
   CheckCircle2,
+  FileDown,
   ClipboardCheck,
   MoreHorizontal,
   Pencil,
@@ -19,6 +20,7 @@ import {
   type EvalTask,
   type EvalInput,
   type EvalCaseInput,
+  type EvalResult,
 } from './schema';
 import {
   Badge,
@@ -64,6 +66,7 @@ import {
   useAction,
   formatTime,
   matches,
+  formatTokens,
 } from './page';
 import { useAgents } from './agents';
 import { statusLabel } from '../labels';
@@ -294,9 +297,15 @@ function EvalDetail({ task, onRun }: { task: EvalTask; onRun: () => void }) {
       }
       footer={
         <>
-          <Button variant="outline" className="mr-auto" onClick={() => setAdding(true)}>
+          <Button variant="outline" onClick={() => setAdding(true)}>
             <Plus />
             添加用例
+          </Button>
+          <Button variant="ghost" className="mr-auto" asChild disabled={!results.data?.length}>
+            <a href={client.evals.reportUrl(task.id)} download aria-disabled={!results.data?.length}>
+              <FileDown />
+              下载报告
+            </a>
           </Button>
           <Button
             disabled={task.status === 'running' || !cases.data?.length}
@@ -331,7 +340,7 @@ function EvalDetail({ task, onRun }: { task: EvalTask; onRun: () => void }) {
                     <span className="mt-0.5 text-xs text-muted-foreground tabular-nums">#{i + 1}</span>
                     <p className="min-w-0 flex-1 text-sm whitespace-pre-wrap">{c.input}</p>
                     {r && (
-                      <Badge variant={r.passed ? 'default' : 'destructive'}>
+                      <Badge variant={verdict(r) ? 'default' : 'destructive'}>
                         {r.passed ? <CheckCircle2 /> : <XCircle />}
                         {r.score.toFixed(1)}
                       </Badge>
@@ -365,11 +374,19 @@ function EvalDetail({ task, onRun }: { task: EvalTask; onRun: () => void }) {
             {results.data?.map((r) => (
               <Collapsible key={r.caseId} className="rounded-lg border">
                 <CollapsibleTrigger className="flex w-full cursor-pointer items-center gap-2 px-3 py-2.5 text-left">
-                  <Badge variant={r.passed ? 'default' : 'destructive'}>
-                    {r.passed ? <CheckCircle2 /> : <XCircle />}
+                  <Badge variant={verdict(r) ? 'default' : 'destructive'}>
+                    {verdict(r) ? <CheckCircle2 /> : <XCircle />}
                     {r.score.toFixed(1)}
                   </Badge>
+                  {r.manualPassed !== null && (
+                    <Badge variant="outline" className="font-normal">
+                      人工{r.manualPassed ? '通过' : '不通过'}
+                    </Badge>
+                  )}
                   <span className="min-w-0 flex-1 truncate text-sm">{r.input}</span>
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {formatTokens(r.inputTokens)} / {formatTokens(r.outputTokens)}
+                  </span>
                   <span className="text-xs text-muted-foreground tabular-nums">
                     {(r.durationMs / 1000).toFixed(1)}s
                   </span>
@@ -389,6 +406,7 @@ function EvalDetail({ task, onRun }: { task: EvalTask; onRun: () => void }) {
                       <p className="whitespace-pre-wrap text-muted-foreground">{r.reason}</p>
                     </div>
                   )}
+                  <Review taskId={task.id} result={r} />
                 </CollapsibleContent>
               </Collapsible>
             ))}
@@ -399,6 +417,48 @@ function EvalDetail({ task, onRun }: { task: EvalTask; onRun: () => void }) {
         {adding && <CaseEditor taskId={task.id} onDone={() => setAdding(false)} />}
       </Dialog>
     </SheetContent>
+  );
+}
+
+/** Effective verdict: a human review overrides the judge. / 人工判定优先于裁判结果。 */
+const verdict = (r: EvalResult) => r.manualPassed ?? r.passed;
+
+function Review({ taskId, result: r }: { taskId: string; result: EvalResult }) {
+  const { client } = useStudio();
+  const [manual, setManual] = React.useState(r.manualPassed === null ? '' : String(r.manualPassed));
+  const [note, setNote] = React.useState(r.note);
+  const save = useAction(
+    () =>
+      client.evals.review(taskId, r.caseId, { manualPassed: manual === '' ? null : manual === 'true', note }),
+    { invalidate: [keys.evalResults(taskId), keys.evals], success: '已保存人工判定' },
+  );
+  const dirty = manual !== (r.manualPassed === null ? '' : String(r.manualPassed)) || note !== r.note;
+  return (
+    <div className="mt-1 flex flex-col gap-2 rounded-lg bg-muted/50 p-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium">人工判定</span>
+        <NativeSelect
+          aria-label="人工判定"
+          className="h-8 w-28 text-[12px]"
+          value={manual}
+          onChange={(e) => setManual(e.target.value)}
+        >
+          <option value="">未复核</option>
+          <option value="true">通过</option>
+          <option value="false">不通过</option>
+        </NativeSelect>
+        <Input
+          aria-label="备注"
+          className="h-8 min-w-40 flex-1 text-[12px]"
+          placeholder="备注（可选）"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+        />
+        <Button size="sm" disabled={!dirty} loading={save.isPending} onClick={() => save.mutate(undefined)}>
+          保存
+        </Button>
+      </div>
+    </div>
   );
 }
 

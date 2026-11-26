@@ -15,6 +15,9 @@ export const keys = {
   documents: (id: string) => ['knowledge', id, 'documents'] as const,
   graphs: ['graphs'] as const,
   graphData: (id: string) => ['graphs', id, 'data'] as const,
+  mcp: ['mcp'] as const,
+  memories: (agentId: string) => ['memories', agentId] as const,
+  analytics: (kind: string, agentId: string, days: number) => ['analytics', kind, agentId, days] as const,
   evals: ['evals'] as const,
   evalCases: (id: string) => ['evals', id, 'cases'] as const,
   evalResults: (id: string) => ['evals', id, 'results'] as const,
@@ -116,6 +119,10 @@ export const formatTime = (iso?: string) => {
 };
 export const formatBytes = (n: number) =>
   n < 1024 ? `${n} B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 ** 2).toFixed(1)} MB`;
+
+/** 1234 → 1.2k, 1234567 → 1.23M */
+export const formatTokens = (n: number) =>
+  n < 1000 ? String(n) : n < 1_000_000 ? `${(n / 1000).toFixed(1)}k` : `${(n / 1_000_000).toFixed(2)}M`;
 
 export function matches(keyword: string, ...fields: (string | undefined)[]) {
   const k = keyword.trim().toLowerCase();

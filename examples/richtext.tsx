@@ -36,6 +36,7 @@ const state: Snapshot = {
   })),
   activities: [],
   queue: [],
+  prompts: [],
   report: null,
 };
 const listeners = new Set<(e: ResourceEvent) => void>();

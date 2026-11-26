@@ -48,6 +48,7 @@ export const snapshot = (id = 'a'): Snapshot => ({
   messages: [],
   activities: [],
   queue: [],
+  prompts: [],
   report: null,
 });
 export const deferred = <T>() => {

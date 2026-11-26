@@ -17,6 +17,7 @@ import {
 import { useStudio } from '../provider';
 import { knowledgeInputSchema, type KnowledgeBase, type KnowledgeInput } from './schema';
 import {
+  Badge,
   Button,
   Empty,
   Field,
@@ -31,6 +32,7 @@ import {
   Td,
 } from '../ui/primitives';
 import {
+  Combobox,
   Confirm,
   Dialog,
   DialogContent,
@@ -54,11 +56,13 @@ import {
   matches,
 } from './page';
 import { cn } from '../lib/utils';
+import { modelGroups, modelLabel, useProviders } from './nav';
 
 const toInput = (k: KnowledgeBase): KnowledgeInput => ({
   name: k.name,
   description: k.description,
   enabled: k.enabled,
+  embeddingModel: k.embeddingModel,
 });
 const ACCEPT = {
   'text/*': ['.md', '.markdown', '.txt', '.rst', '.json', '.yaml', '.yml', '.toml', '.py', '.js', '.ts'],
@@ -67,6 +71,7 @@ const ACCEPT = {
 
 export function KnowledgeManager() {
   const { client } = useStudio();
+  const providers = useProviders();
   const q = useQuery({ queryKey: keys.knowledge, queryFn: ({ signal }) => client.knowledge.list(signal) });
   const [keyword, setKeyword] = React.useState('');
   const [editing, setEditing] = React.useState<KnowledgeBase | null | undefined>();
@@ -109,6 +114,7 @@ export function KnowledgeManager() {
               <Tr>
                 <Th className="pl-6">名称</Th>
                 <Th>文档</Th>
+                <Th>检索</Th>
                 <Th>大小</Th>
                 <Th>启用</Th>
                 <Th>更新时间</Th>
@@ -127,6 +133,13 @@ export function KnowledgeManager() {
                     </button>
                   </Td>
                   <Td className="tabular-nums">{k.documentCount}</Td>
+                  <Td>
+                    <Badge variant={k.embeddingModel ? 'default' : 'secondary'} className="font-normal">
+                      {k.embeddingModel
+                        ? `向量 · ${modelLabel(providers.data, k.embeddingModel) ?? '模型不可用'}`
+                        : '关键词'}
+                    </Badge>
+                  </Td>
                   <Td className="text-[12px] text-muted-foreground tabular-nums">
                     {formatBytes(k.totalBytes)}
                   </Td>
@@ -191,9 +204,10 @@ export function KnowledgeManager() {
 
 function KnowledgeEditor({ base, onDone }: { base: KnowledgeBase | null; onDone: () => void }) {
   const { client } = useStudio();
+  const providers = useProviders();
   const form = useForm<KnowledgeInput>({
     resolver: zodResolver(knowledgeInputSchema),
-    defaultValues: base ? toInput(base) : { name: '', description: '', enabled: true },
+    defaultValues: base ? toInput(base) : { name: '', description: '', enabled: true, embeddingModel: null },
   });
   const save = useAction(
     (v: KnowledgeInput) => (base ? client.knowledge.update(base.id, v) : client.knowledge.create(v)),
@@ -226,6 +240,25 @@ function KnowledgeEditor({ base, onDone }: { base: KnowledgeBase | null; onDone:
         </Field>
         <Field label="描述" htmlFor="k-desc">
           <Textarea id="k-desc" rows={3} {...form.register('description')} />
+        </Field>
+        <Field
+          label="向量模型"
+          hint="选择后检索为语义向量 + 关键词混合；不选则只按关键词检索。同一 Agent 绑定的知识库须使用同一个向量模型。"
+        >
+          <Controller
+            control={form.control}
+            name="embeddingModel"
+            render={({ field }) => (
+              <Combobox
+                aria-label="向量模型"
+                value={field.value}
+                onChange={field.onChange}
+                groups={modelGroups(providers.data ?? [], 'embedding')}
+                placeholder="不使用（仅关键词）"
+                empty="没有向量模型，先在「模型」里把模型类型设为「向量」"
+              />
+            )}
+          />
         </Field>
         <label className="flex items-center gap-3 text-sm">
           <Controller

@@ -4,7 +4,8 @@ import json
 import os
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from axc_agent_engine import LLMMessage, LLMResponse, LLMStreamChunk, LLMConfig
+import httpx
+from axc_agent_engine import LLMMessage, LLMResponse, LLMStreamChunk, LLMConfig, LLMUsage
 from axc_agent_engine.llm.client import OpenAIClient
 
 MODES = dict(group_chat=2, supervisor=2, debate=2, redblue=2, discussion=1, interview=1, social=1, retrospective=1, backcast=1, sandbox=1)
@@ -69,6 +70,8 @@ class FixtureModel:
         for i in range(0, len(text), 8):
             await asyncio.sleep(0.02)
             yield LLMStreamChunk(content_delta=text[i:i+8])
+        # Deterministic usage so token accounting is exercised end to end. / 确定性用量，便于验证 token 统计。
+        yield LLMStreamChunk(usage=LLMUsage(input_tokens=len(prompt), output_tokens=len(text)))
 
     async def ask(self, prompt, **options):
         return '{"action":"done","step_ok":true,"goal_achieved":true}'
@@ -91,8 +94,15 @@ class CompatibleClient(OpenAIClient):
     providers such as DeepSeek reject (422: expected adaptive/enabled/disabled). Map it here:
     auto → omit (provider default), always → enabled.
     引擎把 thinking 原样发成 {"type": "auto"}，DeepSeek 等兼容服务会以 422 拒绝；这里映射：auto 省略，always → enabled。"""
-    def _build_payload(self, messages, tools=None, **kwargs):
+    async def stream(self, messages, tools=None, **kwargs):
+        async for chunk in super().stream(messages, tools, include_usage=True, **kwargs):
+            yield chunk
+    def _build_payload(self, messages, tools=None, *, include_usage=False, **kwargs):
         payload = super()._build_payload(messages, tools, **kwargs)
+        # OpenAI-compatible servers only report usage on streams when asked to; stream_options is rejected on
+        # non-stream calls, so only stream() sets it. / 流式请求须显式要求用量；非流式请求不能带该字段。
+        if include_usage:
+            payload['stream_options'] = {'include_usage': True}
         thinking = payload.get('thinking')
         if isinstance(thinking, dict):
             if thinking.get('type') == 'always':
@@ -107,6 +117,20 @@ class CompatibleClient(OpenAIClient):
         return payload
 def openai_client(base_url, api_key, model):
     return CompatibleClient(LLMConfig(base_url=base_url, api_key=api_key, model=model))
+class EmbeddingClient:
+    """OpenAI-compatible ``POST {baseUrl}/embeddings``; mounted as engine ``knowledge.embedding``.
+    OpenAI 兼容的向量接口，挂载为引擎 knowledge.embedding。"""
+    def __init__(self, base_url, api_key, model):
+        self.model = model
+        headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
+        self.client = httpx.AsyncClient(base_url=base_url.rstrip('/') + '/', headers=headers, timeout=60)
+    async def embed(self, texts):
+        response = await self.client.post('embeddings', json={'model': self.model, 'input': list(texts)})
+        response.raise_for_status()
+        rows = sorted(response.json()['data'], key=lambda row: row['index'])
+        return [row['embedding'] for row in rows]
+    async def close(self):
+        await self.client.aclose()
 def has_images(messages):
     for message in messages or []:
         content = message.get('content') if isinstance(message, dict) else None

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Request, Response
-from ..schemas import EvalCaseInput, EvalInput
+from ..schemas import EvalCaseInput, EvalInput, EvalReview
 from . import host_of
 
 router = APIRouter(prefix='/api/evals', tags=['evals'])
@@ -57,3 +57,10 @@ async def run_eval(request: Request, ident: str):
 @router.get('/{ident}/results')
 async def eval_results(request: Request, ident: str):
     return host_of(request).evals.results(ident)
+@router.put('/{ident}/results/{case_id}')
+async def review_result(request: Request, ident: str, case_id: str, body: EvalReview):
+    return host_of(request).evals.review(ident, case_id, body)
+@router.get('/{ident}/report')
+async def eval_report(request: Request, ident: str):
+    return Response(host_of(request).evals.report(ident), media_type='text/markdown; charset=utf-8',
+                    headers={'Content-Disposition': f'attachment; filename="eval-{ident}.md"'})

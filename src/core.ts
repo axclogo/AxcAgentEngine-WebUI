@@ -67,8 +67,30 @@ export const messageSchema = z.object({
   createdAt: z.string(),
   parts: z.array(partSchema).optional(),
   attachments: z.array(attachmentSchema).optional(),
+  /** Token usage of the run that produced this assistant reply. / 生成这条回复的那次运行的 token 用量。 */
+  usage: z.object({ inputTokens: z.number().int(), outputTokens: z.number().int() }).optional(),
 });
 export type Message = z.infer<typeof messageSchema>;
+/**
+ * A pending human interaction raised by the engine during a run: a tool approval (human_in_the_loop)
+ * or an ask_human question. Answered with the `respond` command.
+ * 运行中引擎发起的人工交互：工具审批或 ask_human 提问，用 respond 命令回答。
+ */
+export const promptSchema = z.object({
+  id,
+  order: z.number(),
+  kind: z.enum(['approval', 'question']),
+  status: z.enum(['pending', 'answered', 'expired']),
+  toolName: z.string().optional(),
+  arguments: z.record(z.string(), z.unknown()).optional(),
+  riskLevel: z.string().optional(),
+  question: z.string().optional(),
+  options: z.array(z.string()).optional(),
+  /** approval: true/false; question: the answer text. */
+  answer: z.union([z.boolean(), z.string()]).optional(),
+  createdAt: z.string(),
+});
+export type Prompt = z.infer<typeof promptSchema>;
 export const activitySchema = z.object({
   id,
   order: z.number(),
@@ -105,6 +127,8 @@ export const capabilitiesSchema = z.object({
   interview: z.boolean(),
   report: z.boolean(),
   edit: z.boolean(),
+  /** Answer pending prompts. / 回答待处理的人工交互。 */
+  respond: z.boolean().default(false),
 });
 export type Capabilities = z.infer<typeof capabilitiesSchema>;
 export const noCapabilities: Capabilities = Object.fromEntries(
@@ -135,6 +159,7 @@ export const snapshotSchema = z.object({
   messages: z.array(messageSchema),
   activities: z.array(activitySchema),
   queue: z.array(queueSchema),
+  prompts: z.array(promptSchema),
   report: z.string().nullable(),
 });
 export type Snapshot = z.infer<typeof snapshotSchema>;
@@ -144,6 +169,7 @@ export const eventSchema = z.discriminatedUnion('kind', [
   z.object({ seq: z.number().int().positive(), kind: z.literal('activity'), value: activitySchema }),
   z.object({ seq: z.number().int().positive(), kind: z.literal('queue'), value: queueSchema }),
   z.object({ seq: z.number().int().positive(), kind: z.literal('report'), value: z.string().nullable() }),
+  z.object({ seq: z.number().int().positive(), kind: z.literal('prompt'), value: promptSchema }),
 ]);
 export type ResourceEvent = z.infer<typeof eventSchema>;
 export type Scope = { key: string; shortcut?: { shortcut_key: string; context: Record<string, unknown> } };
@@ -160,7 +186,8 @@ export type Command =
   | { type: 'cancelRequest'; requestId: string }
   | { type: 'stop' | 'resume' | 'start' | 'pause' | 'delete' | 'archive' | 'unarchive' | 'generateReport' }
   | { type: 'fork'; checkpointId: string }
-  | { type: 'interview'; requestId: string; target: string; question: string };
+  | { type: 'interview'; requestId: string; target: string; question: string }
+  | { type: 'respond'; promptId: string; approved?: boolean; answer?: string };
 export type Attachment = z.infer<typeof attachmentSchema>;
 export interface Option {
   id: string;
@@ -213,6 +240,8 @@ export function applyEvent(s: Snapshot, e: ResourceEvent): Snapshot {
       return { ...next, queue: upsert(s.queue, e.value) };
     case 'report':
       return { ...next, report: e.value };
+    case 'prompt':
+      return { ...next, prompts: upsert(s.prompts, e.value) };
   }
 }
 // Replay only events newer than the authoritative snapshot. / 仅重放晚于权威快照的事件。

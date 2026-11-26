@@ -6,13 +6,16 @@ const id = z.string().min(1);
 const timestamps = { createdAt: z.string(), updatedAt: z.string() };
 
 // ---------- Model providers / 模型提供商 ----------
-export const modelTypes = ['llm', 'embedding', 'image'] as const;
+export const modelTypes = ['llm', 'embedding'] as const;
 export const modelEntrySchema = z.object({
   id: z.string().trim().min(1, '模型 ID 不能为空'),
   label: z.string(),
   type: z.enum(modelTypes),
   vision: z.boolean(),
   contextWindow: z.number().int().positive().nullable(),
+  /** Price per 1k tokens, used by cost analysis; null = unknown. / 每千 token 价格，用于成本分析。 */
+  inputPricePer1k: z.number().nonnegative().nullable(),
+  outputPricePer1k: z.number().nonnegative().nullable(),
 });
 export type ModelEntry = z.infer<typeof modelEntrySchema>;
 export const providerSchema = z.object({
@@ -107,7 +110,6 @@ export const agentInputSchema = z.object({
     main: z.string().nullable(),
     utility: z.string().nullable(),
     vision: z.string().nullable(),
-    image: z.string().nullable(),
   }),
   /** plugin name -> config. Only enabled plugins are written to agent.yaml. */
   plugins: z.record(
@@ -119,6 +121,8 @@ export const agentInputSchema = z.object({
     knowledge: z.array(z.string()),
     /** The engine graph plugin mounts one store per agent. / 引擎图谱插件每个 Agent 挂载一个存储。 */
     graph: z.string().nullable(),
+    /** MCP server ids; enables the engine mcp plugin. / 绑定的 MCP 服务。 */
+    mcp: z.array(z.string()),
   }),
 });
 export type AgentInput = z.infer<typeof agentInputSchema>;
@@ -126,6 +130,8 @@ export const agentSchema = agentInputSchema.extend({
   id,
   /** ok: main model resolvable; unset: no main model; missing: provider/model removed or disabled. */
   modelStatus: z.enum(['ok', 'unset', 'missing']),
+  /** Cumulative token usage over all conversation runs. / 全部对话运行的累计 token。 */
+  usage: z.object({ inputTokens: z.number().int(), outputTokens: z.number().int(), runs: z.number().int() }),
   ...timestamps,
 });
 export type Agent = z.infer<typeof agentSchema>;
@@ -158,6 +164,8 @@ export const knowledgeInputSchema = z.object({
   name: z.string().trim().min(1, '名称不能为空'),
   description: z.string(),
   enabled: z.boolean(),
+  /** Embedding ModelRef; null = keyword (BM25) search only. / 向量模型；为空时仅关键词检索。 */
+  embeddingModel: z.string().nullable(),
 });
 export type KnowledgeInput = z.infer<typeof knowledgeInputSchema>;
 export const knowledgeSchema = knowledgeInputSchema.extend({
@@ -261,5 +269,129 @@ export const evalResultSchema = z.object({
   reason: z.string(),
   durationMs: z.number(),
   error: z.string(),
+  inputTokens: z.number().int(),
+  outputTokens: z.number().int(),
+  /** Human verdict overriding `passed`; null = not reviewed. / 人工判定，覆盖自动结果。 */
+  manualPassed: z.boolean().nullable(),
+  note: z.string(),
 });
 export type EvalResult = z.infer<typeof evalResultSchema>;
+export const evalReviewSchema = z.object({ manualPassed: z.boolean().nullable(), note: z.string() });
+export type EvalReview = z.infer<typeof evalReviewSchema>;
+
+// ---------- MCP servers ----------
+export const mcpInputSchema = z
+  .object({
+    name: z
+      .string()
+      .trim()
+      .min(1, '名称不能为空')
+      .regex(/^[A-Za-z][\w-]*$/, '以字母开头，只含字母、数字、下划线、连字符'),
+    description: z.string(),
+    enabled: z.boolean(),
+    transport: z.enum(['stdio', 'http']),
+    command: z.string(),
+    args: z.array(z.string()),
+    /** Write-only on update: empty values keep the stored secret. / 更新时留空保持原值。 */
+    env: z.record(z.string(), z.string()),
+    url: z.string(),
+    headers: z.record(z.string(), z.string()),
+  })
+  .superRefine((v, ctx) => {
+    if (v.transport === 'stdio' && !v.command.trim())
+      ctx.addIssue({ code: 'custom', path: ['command'], message: 'stdio 需要启动命令' });
+    if (v.transport === 'http' && !/^https?:\/\//.test(v.url))
+      ctx.addIssue({ code: 'custom', path: ['url'], message: '请输入 http(s) 地址' });
+  });
+export type McpInput = z.infer<typeof mcpInputSchema>;
+export const mcpSchema = z.object({
+  id,
+  name: z.string(),
+  description: z.string(),
+  enabled: z.boolean(),
+  transport: z.enum(['stdio', 'http']),
+  command: z.string(),
+  args: z.array(z.string()),
+  /** Keys only; values never leave the server. / 只返回键名，值不出服务端。 */
+  envKeys: z.array(z.string()),
+  url: z.string(),
+  headerKeys: z.array(z.string()),
+  ...timestamps,
+});
+export type McpServer = z.infer<typeof mcpSchema>;
+export const mcpTestSchema = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  tools: z.array(z.object({ name: z.string(), description: z.string() })),
+});
+export type McpTest = z.infer<typeof mcpTestSchema>;
+
+// ---------- Memories (engine memory plugin) ----------
+export const memorySchema = z.object({
+  /** Opaque storage key. / 存储键。 */
+  id,
+  agentId: z.string(),
+  layer: z.string(),
+  content: z.string(),
+  factType: z.string(),
+  importance: z.number(),
+  source: z.string(),
+  accessCount: z.number().int(),
+  createdAt: z.string(),
+  lastAccessedAt: z.string(),
+});
+export type Memory = z.infer<typeof memorySchema>;
+
+// ---------- Analytics (engine sidecars) ----------
+export const failureReportSchema = z.object({
+  records: z.number().int(),
+  categoryCounts: z.record(z.string(), z.number().int()),
+  clusters: z.array(
+    z.object({
+      key: z.string(),
+      category: z.string(),
+      count: z.number().int(),
+      severity: z.number(),
+      agents: z.array(z.string()),
+      suggestedAction: z.string(),
+      examples: z.array(
+        z.object({
+          id: z.string(),
+          agentId: z.string(),
+          message: z.string(),
+          task: z.string(),
+          toolName: z.string(),
+        }),
+      ),
+    }),
+  ),
+});
+export type FailureReport = z.infer<typeof failureReportSchema>;
+export const distillReportSchema = z.object({
+  traces: z.number().int(),
+  rules: z.array(z.object({ text: z.string(), confidence: z.number(), evidence: z.array(z.string()) })),
+  toolPreferences: z.array(z.string()),
+  antiPatterns: z.array(
+    z.object({ text: z.string(), confidence: z.number(), evidence: z.array(z.string()) }),
+  ),
+  skillCandidates: z.array(z.string()),
+});
+export type DistillReport = z.infer<typeof distillReportSchema>;
+export const costReportSchema = z.object({
+  samples: z.number().int(),
+  totalCost: z.number(),
+  totalTokens: z.number().int(),
+  /** Samples whose model has no price configured. / 没有配置价格的样本数。 */
+  unpricedSamples: z.number().int(),
+  byAgent: z.record(z.string(), z.number()),
+  byModel: z.record(z.string(), z.number()),
+  findings: z.array(
+    z.object({
+      title: z.string(),
+      impact: z.number(),
+      recommendation: z.string(),
+      evidence: z.array(z.string()),
+    }),
+  ),
+});
+export type CostReport = z.infer<typeof costReportSchema>;

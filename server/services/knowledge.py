@@ -15,7 +15,8 @@ EXTENSIONS = {
 
 
 class KnowledgeService:
-    def __init__(self, db, data: Path):
+    def __init__(self, db, data: Path, providers):
+        self.providers = providers
         self.items = Collection(db, 'knowledge', '知识库')
         self.docs = Collection(db, 'knowledge_doc', '文档')
         self.root = data / 'knowledge'
@@ -38,6 +39,10 @@ class KnowledgeService:
         return [self.public(r) for r in self.items.all()]
 
     def save(self, body: KnowledgeInput, ident: str | None = None) -> dict:
+        if body.embedding_model is not None:
+            resolved = self.providers.resolve(body.embedding_model)
+            if not resolved or resolved[1]['type'] != 'embedding':
+                raise ValueError('向量模型不存在或不是 embedding 类型')
         old = self.items.get(ident) if ident else None
         stamp = now()
         row = {**body.dump(), 'id': ident or uid(), 'createdAt': old['createdAt'] if old else stamp, 'updatedAt': stamp}
@@ -89,6 +94,9 @@ class KnowledgeService:
         path.unlink(missing_ok=True)
         self.items.put({**self.items.get(ident), 'updatedAt': now()})
 
+    def embedding_models(self, ids: list[str]) -> set[str | None]:
+        """Embedding ModelRefs of enabled bound bases (None = keyword only). / 已启用知识库的向量模型。"""
+        return {kb['embeddingModel'] for i in ids if (kb := self.items.find(i)) and kb['enabled']}
     def sources(self, ids: list[str]) -> list[str]:
         """Document paths of enabled bound bases. / 已启用知识库的文档路径。"""
         out = []

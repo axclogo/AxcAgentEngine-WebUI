@@ -5,18 +5,27 @@ The judge is the agent's utility model (else main). In fixture mode (shared dete
 judge is used: a case scores 10 when ``expectedOutput`` is empty or contained in the output and every
 ``expectedTools`` entry was called, otherwise 0.
 分数为 0–10，≥6 且无错误为通过。fixture 模式不使用 LLM 裁判，改为确定性包含匹配。
+A human verdict (``manualPassed``) overrides ``passed`` in the task pass rate. / 人工判定覆盖自动结果。
 """
 from __future__ import annotations
 import asyncio
 import logging
-from axc_agent_engine.sidecar.eval.runner import EvalCase, EvalRunner
-from ..schemas import EvalCaseInput, EvalInput
+from axc_agent_engine.sidecar.eval.report import generate_report
+from axc_agent_engine.sidecar.eval.runner import EvalCase, EvalResult, EvalRunner
+from ..schemas import EvalCaseInput, EvalInput, EvalReview
 from .common import Collection, NotFound, now, uid
 
 PASS_SCORE = 6.0
 logger = logging.getLogger(__name__)
 
 
+def pass_rate(results: list[dict]) -> float | None:
+    if not results:
+        return None
+    verdicts = [r['passed'] if r['manualPassed'] is None else r['manualPassed'] for r in results]
+    return round(sum(verdicts) / len(verdicts), 4)
+def cell(text) -> str:
+    return str(text).replace('|', '\\|').replace('\n', ' ')
 def deterministic_judge(case: EvalCase, result) -> float:
     expected = (case.expected_output or '').strip()
     output_ok = not expected or expected in (result.actual_output or '')
@@ -78,6 +87,40 @@ class EvalService:
         self.items.get(ident)
         return self.db.get('eval_result', ident) or []
 
+    def review(self, ident: str, case_id: str, body: EvalReview) -> dict:
+        if self.items.get(ident)['status'] == 'running':
+            raise ValueError('评估运行中，不可标注')
+        results = self.results(ident)
+        target = next((r for r in results if r['caseId'] == case_id), None)
+        if target is None:
+            raise NotFound('评估结果不存在')
+        target.update(body.dump())
+        self.db.put('eval_result', ident, results)
+        self._finish(ident, passRate=pass_rate(results))
+        return target
+    def report(self, ident: str) -> str:
+        """Markdown: engine ``generate_report`` summary, then per-case verdicts and notes.
+        The engine scores on 0-1 with ``pass_threshold`` on the same scale, so stored 0-10 scores are divided by
+        10 and the threshold is PASS_SCORE / 10. Its pass count is score-only; the manual-aware rate follows.
+        引擎报告使用 0–1 分制，这里把 0–10 分与阈值同除以 10；引擎通过数只看分数，人工修正后的通过率另列。"""
+        task = self.public(self.items.get(ident))
+        results = self.results(ident)
+        engine = generate_report([EvalResult(case_id=r['caseId'], input=r['input'], actual_output=r['output'],
+                                             actual_tools=list(r['tools']), score=r['score'] / 10, judge_reason=r['reason'],
+                                             input_tokens=r['inputTokens'], output_tokens=r['outputTokens'],
+                                             duration_ms=r['durationMs'], error=r['error']) for r in results],
+                                 pass_threshold=PASS_SCORE / 10)
+        agent = self.agents.items.find(task['agentId'])
+        rate = pass_rate(results)
+        lines = [f"# 评估报告：{task['name']}", '', f"- Agent：{agent['name'] if agent else task['agentId']}",
+                 f"- 状态：{task['status']}", f"- 通过率（含人工标注）：{'—' if rate is None else f'{rate:.0%}'}", '',
+                 '## 汇总', '', '```', engine.summary(), '```', '', '## 用例', '',
+                 '| # | 输入 | 分数 | 自动判定 | 人工判定 | 备注 | 错误 |', '|---|---|---|---|---|---|---|']
+        verdict = {True: '通过', False: '未通过', None: '—'}
+        for i, r in enumerate(results, 1):
+            lines.append(f"| {i} | {cell(r['input'])} | {r['score']} | {verdict[r['passed']]} | {verdict[r['manualPassed']]} "
+                         f"| {cell(r['note'])} | {cell(r['error'])} |")
+        return '\n'.join(lines) + '\n'
     def start(self, ident: str, host) -> dict:
         row = self.items.get(ident)
         if row['status'] == 'running':
@@ -105,11 +148,11 @@ class EvalService:
                 score = round(max(0.0, min(1.0, float(r.score))) * 10, 2)
                 out.append({'caseId': r.case_id, 'input': r.input, 'output': r.actual_output, 'tools': list(r.actual_tools),
                             'score': score, 'passed': score >= PASS_SCORE and not r.error,
-                            'reason': r.judge_reason, 'durationMs': r.duration_ms, 'error': r.error})
+                            'reason': r.judge_reason, 'durationMs': r.duration_ms, 'error': r.error,
+                            'inputTokens': r.input_tokens, 'outputTokens': r.output_tokens, 'manualPassed': None, 'note': ''})
             self.db.put('eval_result', ident, out)
             avg = round(sum(r['score'] for r in out) / len(out), 2) if out else None
-            rate = round(sum(r['passed'] for r in out) / len(out), 4) if out else None
-            self._finish(ident, status='completed', avgScore=avg, passRate=rate)
+            self._finish(ident, status='completed', avgScore=avg, passRate=pass_rate(out))
         except asyncio.CancelledError:
             self._finish(ident, status='failed', error='评估被中断')
             raise

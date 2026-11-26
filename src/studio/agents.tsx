@@ -17,6 +17,7 @@ import {
   Sparkles,
   Share2,
   ChevronRight,
+  Plug,
 } from 'lucide-react';
 import { useStudio } from '../provider';
 import { agentInputSchema, type Agent, type AgentInput, type PluginInfo, type Validation } from './schema';
@@ -66,9 +67,11 @@ import {
   useAction,
   formatTime,
   matches,
+  formatTokens,
 } from './page';
 import { modelGroups, modelLabel, useNavigate, useProviders, type ModelSlot } from './nav';
 import { PluginConfigForm } from './plugin-form';
+import { useMcpServers } from './mcp';
 import { errorText } from '../state';
 import { cn } from '../lib/utils';
 
@@ -88,12 +91,12 @@ export const blankAgent: AgentInput = {
     parallelToolCalls: true,
     humanInTheLoop: false,
   },
-  models: { main: null, utility: null, vision: null, image: null },
+  models: { main: null, utility: null, vision: null },
   plugins: { compress: { enabled: true, config: {} } },
-  bindings: { skills: [], knowledge: [], graph: null },
+  bindings: { skills: [], knowledge: [], graph: null, mcp: [] },
 };
-const toInput = (a: Agent): AgentInput => {
-  const { id: _id, modelStatus: _m, createdAt: _c, updatedAt: _u, ...rest } = a;
+export const agentToInput = (a: Agent): AgentInput => {
+  const { id: _id, modelStatus: _m, usage: _usage, createdAt: _c, updatedAt: _u, ...rest } = a;
   return rest;
 };
 
@@ -111,9 +114,12 @@ export function AgentManager() {
   const [status, setStatus] = React.useState('');
   const [editing, setEditing] = React.useState<{ agent?: Agent; initial: AgentInput } | undefined>();
   const [deleting, setDeleting] = React.useState<Agent>();
-  const toggle = useAction((a: Agent) => client.agents.update(a.id, { ...toInput(a), enabled: !a.enabled }), {
-    invalidate: [keys.agents],
-  });
+  const toggle = useAction(
+    (a: Agent) => client.agents.update(a.id, { ...agentToInput(a), enabled: !a.enabled }),
+    {
+      invalidate: [keys.agents],
+    },
+  );
   const remove = useAction((a: Agent) => client.agents.remove(a.id), {
     invalidate: [keys.agents],
     success: '已删除',
@@ -160,6 +166,7 @@ export function AgentManager() {
                 <Th>策略</Th>
                 <Th>主模型</Th>
                 <Th>绑定</Th>
+                <Th title="全部对话运行累计的输入 / 输出 token">用量</Th>
                 <Th>启用</Th>
                 <Th>更新时间</Th>
                 <Th className="w-12 pr-6" />
@@ -172,7 +179,7 @@ export function AgentManager() {
                     <button
                       type="button"
                       className="flex cursor-pointer items-center gap-3 text-left"
-                      onClick={() => setEditing({ agent: a, initial: toInput(a) })}
+                      onClick={() => setEditing({ agent: a, initial: agentToInput(a) })}
                     >
                       <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-lg">
                         {a.avatar || '🤖'}
@@ -218,8 +225,27 @@ export function AgentManager() {
                           <Share2 className="size-3.5" />1
                         </span>
                       )}
-                      {!a.bindings.skills.length && !a.bindings.knowledge.length && !a.bindings.graph && '—'}
+                      {a.bindings.mcp.length > 0 && (
+                        <span className="inline-flex items-center gap-0.5" title="MCP 服务">
+                          <Plug className="size-3.5" />
+                          {a.bindings.mcp.length}
+                        </span>
+                      )}
+                      {!a.bindings.skills.length &&
+                        !a.bindings.knowledge.length &&
+                        !a.bindings.graph &&
+                        !a.bindings.mcp.length &&
+                        '—'}
                     </div>
+                  </Td>
+                  <Td className="text-[12px] whitespace-nowrap text-muted-foreground tabular-nums">
+                    {a.usage.runs ? (
+                      <span title={`${a.usage.runs} 次运行`}>
+                        {formatTokens(a.usage.inputTokens)} / {formatTokens(a.usage.outputTokens)}
+                      </span>
+                    ) : (
+                      '—'
+                    )}
                   </Td>
                   <Td>
                     <Switch
@@ -251,13 +277,13 @@ export function AgentManager() {
                           </Button>
                         </MenuTrigger>
                         <MenuContent>
-                          <MenuItem onSelect={() => setEditing({ agent: a, initial: toInput(a) })}>
+                          <MenuItem onSelect={() => setEditing({ agent: a, initial: agentToInput(a) })}>
                             <Pencil />
                             编辑
                           </MenuItem>
                           <MenuItem
                             onSelect={() =>
-                              setEditing({ initial: { ...toInput(a), name: `${a.name} 副本` } })
+                              setEditing({ initial: { ...agentToInput(a), name: `${a.name} 副本` } })
                             }
                           >
                             <Copy />
@@ -478,11 +504,10 @@ export function AgentEditor({
   );
 }
 
-const SLOTS: { slot: ModelSlot; label: string; hint: string }[] = [
+const SLOTS: { slot: Exclude<ModelSlot, 'embedding'>; label: string; hint: string }[] = [
   { slot: 'main', label: '主模型', hint: '对话与工具调用使用的模型，必填才能运行' },
   { slot: 'utility', label: '辅助模型', hint: '摘要、改写、重排与评估裁判；不设置时使用主模型' },
   { slot: 'vision', label: '视觉模型', hint: '消息含图片时替代主模型；仅列出标记为「视觉」的模型' },
-  { slot: 'image', label: '图片生成模型', hint: '供图片生成类工具使用' },
 ];
 function ModelFields({ form }: { form: UseFormReturn<AgentInput> }) {
   const providers = useProviders();
@@ -530,6 +555,7 @@ function ResourceFields({ form }: { form: UseFormReturn<AgentInput> }) {
   const skills = useQuery({ queryKey: keys.skills, queryFn: ({ signal }) => client.skills.list(signal) });
   const kbs = useQuery({ queryKey: keys.knowledge, queryFn: ({ signal }) => client.knowledge.list(signal) });
   const graphs = useQuery({ queryKey: keys.graphs, queryFn: ({ signal }) => client.graphs.list(signal) });
+  const mcp = useMcpServers();
   return (
     <div className="flex flex-col gap-4">
       <Field label="技能（Skills）" hint="Agent 可按需加载这些技能的说明与脚本">
@@ -594,6 +620,25 @@ function ResourceFields({ form }: { form: UseFormReturn<AgentInput> }) {
           )}
         />
       </Field>
+      <Field label="MCP 服务" hint="Agent 可以调用这些 MCP Server 提供的工具">
+        <Controller
+          control={form.control}
+          name="bindings.mcp"
+          render={({ field }) => (
+            <MultiCombobox
+              aria-label="MCP 服务"
+              value={field.value}
+              onChange={field.onChange}
+              placeholder="选择 MCP 服务"
+              options={(mcp.data ?? []).map((m) => ({
+                value: m.id,
+                label: m.name,
+                hint: m.enabled ? (m.transport === 'stdio' ? '本地命令' : 'HTTP') : '已停用',
+              }))}
+            />
+          )}
+        />
+      </Field>
     </div>
   );
 }
@@ -651,7 +696,9 @@ function RuntimeFields({ form }: { form: UseFormReturn<AgentInput> }) {
       <label className="flex items-center justify-between gap-4 rounded-lg border p-3">
         <span>
           <span className="block text-sm font-medium">人工审批</span>
-          <span className="block text-xs text-muted-foreground">高风险工具调用前需要确认</span>
+          <span className="block text-xs text-muted-foreground">
+            高风险工具调用前先问你；Agent 也能向你提问（ask_human）
+          </span>
         </span>
         <Controller
           control={form.control}
@@ -681,7 +728,8 @@ function PluginFields({ form }: { form: UseFormReturn<AgentInput> }) {
   return (
     <div className="flex flex-col gap-2">
       <p className="mb-1 text-sm text-muted-foreground">
-        技能、知识库与图谱插件由「知识与技能」中的绑定自动启用。其余插件按需开启，未填写的配置使用引擎默认值。
+        技能、知识库、图谱、MCP
+        插件由「知识与技能」中的绑定自动启用，人工审批由「运行参数」里的开关控制。其余插件按需开启，未填写的配置使用引擎默认值。
       </p>
       {list.map((p) => (
         <PluginRow

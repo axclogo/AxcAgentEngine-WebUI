@@ -9,7 +9,7 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from .routers import agents, evals, graphs, knowledge, plugins, providers, resources, skills
+from .routers import agents, analytics, evals, graphs, knowledge, mcp, memories, plugins, providers, resources, skills
 from .services.common import Conflict, NotFound
 from .services.resources import HostService
 
@@ -56,7 +56,7 @@ def create_app(service=None):
         return await call_next(request)
 
     # Specific prefixes first; resources owns the generic /api/{kind} routes. / 资源通配路由最后注册。
-    for module in (providers, plugins, agents, skills, knowledge, graphs, evals, resources):
+    for module in (providers, plugins, agents, skills, knowledge, graphs, evals, mcp, memories, analytics, resources):
         app.include_router(module.router)
     return app
 

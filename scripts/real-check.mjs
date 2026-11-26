@@ -298,7 +298,143 @@ await step('评估：真实模型裁判', async () => {
   await page.getByText(/平均 \d/).waitFor({ timeout: LONG });
   return await page.getByText(/平均 \d/).innerText();
 });
+
+await step('评估：人工判定与下载报告', async () => {
+  await page.getByRole('tab', { name: /结果/ }).click();
+  await page.getByText('1+1 等于几？').last().click();
+  await page.getByLabel('人工判定').selectOption('false');
+  await page.getByLabel('备注').fill('验收：人工改判');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page.getByText('人工不通过').waitFor();
+  const download = page.waitForEvent('download');
+  await page.getByRole('link', { name: '下载报告' }).click();
+  const file = await download;
+  const text = await (await file.createReadStream()).toArray().then((c) => Buffer.concat(c).toString('utf8'));
+  if (!text.includes('验收：人工改判')) throw new Error('报告里没有人工标注');
+  return file.suggestedFilename();
+});
 await page.keyboard.press('Escape');
+
+await step('人工交互：Agent 用 ask_human 提问，回答后继续', async () => {
+  await nav('Agent');
+  await page.getByRole('button', { name: agentName, exact: false }).first().click();
+  await page.getByRole('tab', { name: '运行参数' }).click();
+  await page.getByRole('switch', { name: '人工审批' }).click();
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page.getByRole('button', { name: `${agentName} 操作` }).waitFor();
+  await page
+    .getByRole('button', { name: `${agentName} 操作` })
+    .locator('xpath=..')
+    .getByRole('button', { name: '对话' })
+    .click();
+  await page.getByRole('button', { name: '新会话' }).click();
+  await page.getByRole('heading', { name: '未命名会话' }).waitFor();
+  await page
+    .getByLabel('消息')
+    .fill(
+      '请先调用 ask_human 工具问我“你想去哪个城市？”，选项给北京和上海；拿到我的回答后，只回复“收到：”加城市名。',
+    );
+  await page.getByRole('button', { name: '发送' }).click();
+  const card = page.getByRole('region', { name: 'Agent 提问' });
+  await card.waitFor({ timeout: LONG });
+  await card.getByLabel('回答').fill('杭州');
+  await card.getByRole('button', { name: '回答' }).click();
+  await card.waitFor({ state: 'detached', timeout: LONG });
+  await page.getByRole('status').filter({ hasText: '已完成' }).waitFor({ timeout: LONG });
+  const r = await lastAssistant();
+  if (!r.includes('杭州')) throw new Error('模型没有收到回答：' + r);
+  if (!/tokens/.test(r)) throw new Error('回复下没有显示 token 用量');
+  await shot('ask-human');
+  return r.slice(0, 80);
+});
+
+await step('MCP：添加本地 filesystem 服务，测试连接，绑定后由 Agent 调用', async () => {
+  await nav('MCP 服务');
+  await page.getByRole('button', { name: '添加 MCP 服务' }).click();
+  await dlg()
+    .getByLabel('名称')
+    .fill(`fs${stamp.slice(-4)}`);
+  await dlg().getByLabel('启动命令').fill('npx');
+  for (const a of ['-y', '@modelcontextprotocol/server-filesystem', '/tmp']) {
+    await dlg().getByLabel('参数').fill(a);
+    await page.keyboard.press('Enter');
+  }
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page.getByRole('button', { name: '测试' }).first().click();
+  await page.getByRole('heading', { name: /连接成功|连接失败/ }).waitFor({ timeout: 120000 });
+  const ok = (await page.getByRole('heading', { name: /连接成功|连接失败/ }).innerText()).includes('成功');
+  const tools = await page
+    .getByRole('list', { name: 'MCP 工具' })
+    .getByRole('listitem')
+    .count()
+    .catch(() => 0);
+  await shot('mcp-test');
+  await page.getByRole('button', { name: '关闭' }).click();
+  if (!ok) throw new Error('MCP 连接失败');
+  await nav('Agent');
+  await page.getByRole('button', { name: agentName, exact: false }).first().click();
+  await page.getByRole('tab', { name: '知识与技能' }).click();
+  await page.getByRole('combobox', { name: 'MCP 服务' }).click();
+  await page.getByRole('option', { name: new RegExp(`fs${stamp.slice(-4)}`) }).click();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page
+    .getByRole('button', { name: `${agentName} 操作` })
+    .locator('xpath=..')
+    .getByRole('button', { name: '对话' })
+    .click();
+  await page.getByRole('button', { name: '新会话' }).click();
+  await page.getByRole('heading', { name: '未命名会话' }).waitFor();
+  await send('用 MCP 文件系统工具列出 /tmp 目录里的前 3 个条目名，只列名字');
+  await page
+    .locator('[data-part-id]')
+    .filter({ hasText: /list_directory|list_allowed|directory/i })
+    .first()
+    .waitFor();
+  return `${tools} 个工具`;
+});
+
+await step('记忆：开启记忆插件后，对话内容出现在记忆页并可删除', async () => {
+  await nav('Agent');
+  await page.getByRole('button', { name: agentName, exact: false }).first().click();
+  await page.getByRole('tab', { name: '插件' }).click();
+  await page.getByRole('switch', { name: '启用插件 记忆系统' }).click();
+  // Engine default min_content_length=50 drops most Chinese facts; lower it as a user would. / 引擎默认 50 字会丢掉大多数中文事实。
+  await page.locator('#memory-min_content_length').fill('8');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page
+    .getByRole('button', { name: `${agentName} 操作` })
+    .locator('xpath=..')
+    .getByRole('button', { name: '对话' })
+    .click();
+  await page.getByRole('button', { name: '新会话' }).click();
+  await page.getByRole('heading', { name: '未命名会话' }).waitFor();
+  await send(
+    '请记住关于我的长期偏好：我是后端工程师，最常用的语言是 Go 和 Python，写文档时偏好简洁的中文要点，不要客套话。回复“记住了”即可。',
+  );
+  await nav('记忆');
+  await page.getByLabel('Agent').selectOption({ label: `🤖 ${agentName}` });
+  await page.getByRole('button', { name: '删除这条记忆' }).first().waitFor({ timeout: 60000 });
+  const count = await page.getByRole('button', { name: '删除这条记忆' }).count();
+  await shot('memory');
+  await page.getByRole('button', { name: '删除这条记忆' }).first().click();
+  await page.getByRole('button', { name: '删除', exact: true }).click();
+  await page.getByText('已删除这条记忆').waitFor();
+  return `${count} 条记忆`;
+});
+
+await step('分析：失败分析、经验蒸馏、成本三个报告', async () => {
+  await nav('分析');
+  for (const tab of ['失败分析', '经验蒸馏', '成本']) {
+    await page.getByRole('tab', { name: tab }).click();
+    await page.getByRole('tabpanel').getByText(/./).first().waitFor();
+    if (await page.getByRole('alert').count())
+      throw new Error(`${tab}：${await page.getByRole('alert').first().innerText()}`);
+  }
+  await page.getByText('运行次数').waitFor();
+  await shot('analytics-cost');
+  return await page.getByText('运行次数').locator('xpath=..').innerText();
+});
 
 await step('嵌入抽屉 390px：真实对话', async () => {
   await page.goto(base + '/embed.html');
