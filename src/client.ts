@@ -6,6 +6,7 @@ import {
   eventSchema,
   metaSchema,
   attachmentSchema,
+  grantSchema,
   type Host,
   type Resource,
   type Scope,
@@ -118,6 +119,8 @@ const resultSchema = z.object({
       id: z.string(),
     })
     .optional(),
+  preview: z.object({ messages: z.number(), branches: z.number(), sessions: z.number() }).optional(),
+  grants: z.array(grantSchema).optional(),
 });
 
 export function createHttpClient(options: HttpClientOptions = {}): StudioClient {

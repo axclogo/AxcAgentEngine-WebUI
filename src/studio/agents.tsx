@@ -83,13 +83,16 @@ export const blankAgent: AgentInput = {
   systemPrompt: '',
   strategy: 'react',
   runtime: {
-    maxRounds: 20,
+    maxRounds: 500,
     thinking: 'auto',
     streamIdleTimeout: null,
     stepTimeout: null,
     totalTimeout: null,
     parallelToolCalls: true,
     humanInTheLoop: false,
+    sessionOperations: false,
+    maxWakeups: 100,
+    sessionGrants: [],
   },
   models: { main: null, utility: null, vision: null },
   plugins: { compress: { enabled: true, config: {} } },
@@ -652,14 +655,14 @@ function RuntimeFields({ form }: { form: UseFormReturn<AgentInput> }) {
       <Field
         label="最大轮数"
         htmlFor="r-rounds"
-        hint="单次运行中模型调用的上限，1–500"
+        hint="单次运行中模型调用的上限，1–100000"
         error={errors?.maxRounds?.message}
       >
         <Input
           id="r-rounds"
           type="number"
           min={1}
-          max={500}
+          max={100000}
           {...form.register('runtime.maxRounds', { valueAsNumber: true })}
         />
       </Field>
@@ -708,7 +711,169 @@ function RuntimeFields({ form }: { form: UseFormReturn<AgentInput> }) {
           )}
         />
       </label>
+      <label className="flex items-center justify-between gap-4 rounded-lg border p-3">
+        <span>
+          <span className="block text-sm font-medium">允许操作其他会话</span>
+          <span className="block text-xs text-muted-foreground">
+            Agent 可以读取、发消息、停止或新建其他会话；每个目标第一次访问时会请你授权
+          </span>
+        </span>
+        <Controller
+          control={form.control}
+          name="runtime.sessionOperations"
+          render={({ field }) => (
+            <Switch aria-label="允许操作其他会话" checked={field.value} onCheckedChange={field.onChange} />
+          )}
+        />
+      </label>
+      {form.watch('runtime.sessionOperations') && <SessionOperationsFields form={form} />}
     </div>
+  );
+}
+
+const numberCls =
+  'h-8 w-24 rounded-md border border-input bg-card px-2 text-right text-sm tabular-nums outline-none focus-visible:border-ring';
+function SettingRow({ label, hint, children }: { label: string; hint: string; children: React.ReactNode }) {
+  return (
+    <label className="flex items-center justify-between gap-4 rounded-lg border p-3">
+      <span>
+        <span className="block text-sm font-medium">{label}</span>
+        <span className="block text-xs text-muted-foreground">{hint}</span>
+      </span>
+      {children}
+    </label>
+  );
+}
+
+/**
+ * Session-operation settings: wake-up limit, the sessions plugin config (defaults from the engine catalog) and
+ * pre-authorized access for unattended runs.
+ * 会话操作设置：唤醒上限、sessions 插件配置（默认值取自引擎插件目录）、无人值守时的预先授权。
+ */
+function SessionOperationsFields({ form }: { form: UseFormReturn<AgentInput> }) {
+  const plugins = usePlugins();
+  const agents = useAgents();
+  const fields = plugins.data?.find((p) => p.name === 'sessions')?.fields ?? [];
+  const config = form.watch('plugins.sessions.config') ?? {};
+  const grants = form.watch('runtime.sessionGrants');
+  const value = (key: string) => config[key] ?? fields.find((f) => f.key === key)?.default;
+  const setConfig = (key: string, v: unknown) =>
+    form.setValue(
+      'plugins.sessions',
+      { enabled: true, config: { ...config, [key]: v } },
+      { shouldDirty: true },
+    );
+  const setGrants = (next: AgentInput['runtime']['sessionGrants']) =>
+    form.setValue('runtime.sessionGrants', next, { shouldDirty: true });
+  const numberSetting = (key: string, label: string, hint: string, min: number, max: number) => (
+    <SettingRow key={key} label={label} hint={hint}>
+      <input
+        type="number"
+        aria-label={label}
+        min={min}
+        max={max}
+        value={String(value(key) ?? '')}
+        onChange={(e) => setConfig(key, Number(e.target.value))}
+        className={numberCls}
+      />
+    </SettingRow>
+  );
+  const switchSetting = (key: string, label: string, hint: string) => (
+    <SettingRow key={key} label={label} hint={hint}>
+      <Switch aria-label={label} checked={value(key) === true} onCheckedChange={(v) => setConfig(key, v)} />
+    </SettingRow>
+  );
+  return (
+    <>
+      <SettingRow
+        label="自动唤醒上限"
+        hint="后台会话完成通知让本会话多跑一步就计一次，达到后等你继续；0 为不限制"
+      >
+        <Controller
+          control={form.control}
+          name="runtime.maxWakeups"
+          render={({ field }) => (
+            <input
+              type="number"
+              aria-label="自动唤醒上限"
+              min={0}
+              max={100000}
+              value={field.value}
+              onChange={(e) => field.onChange(e.target.value === '' ? 0 : Number(e.target.value))}
+              className={numberCls}
+            />
+          )}
+        />
+      </SettingRow>
+      {numberSetting(
+        'max_active',
+        '同时运行的派发会话',
+        '本会话派出去、仍在运行的会话数上限，超过直接拒绝',
+        1,
+        256,
+      )}
+      {numberSetting('max_depth', '派发层数上限', 'A 派 B、B 再派 C 算两层', 1, 20)}
+      {switchSetting('allow_create', '允许新建会话', '关闭后只能操作已有会话')}
+      {switchSetting('allow_operate', '允许发消息和停止', '关闭后只能读取其他会话')}
+      {switchSetting('cross_agent', '允许访问其他 Agent 的会话', '关闭后只能访问同一个 Agent 的会话')}
+      <section aria-label="预先授权" className="rounded-lg border p-3">
+        <p className="text-sm font-medium">预先授权</p>
+        <p className="mb-2 text-xs text-muted-foreground">
+          无人值守的长任务用：这里列出的目标不再弹窗确认。你对某个会话的明确拒绝仍然优先。
+        </p>
+        <ul className="flex flex-col gap-1.5">
+          {grants.map((g, i) => (
+            <li key={i} className="flex items-center gap-2">
+              <NativeSelect
+                aria-label={`授权目标 ${i + 1}`}
+                className="h-8 min-w-0 flex-1 text-sm"
+                value={g.target}
+                onChange={(e) =>
+                  setGrants(grants.map((x, j) => (j === i ? { ...x, target: e.target.value } : x)))
+                }
+              >
+                <option value="*">全部会话</option>
+                {(agents.data ?? []).map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name} 的全部会话
+                  </option>
+                ))}
+              </NativeSelect>
+              <NativeSelect
+                aria-label={`授权级别 ${i + 1}`}
+                className="h-8 w-28 text-sm"
+                value={g.level}
+                onChange={(e) =>
+                  setGrants(grants.map((x, j) => (j === i ? { ...x, level: e.target.value as 'read' } : x)))
+                }
+              >
+                <option value="read">只读</option>
+                <option value="operate">读取和操作</option>
+              </NativeSelect>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label={`删除授权 ${i + 1}`}
+                onClick={() => setGrants(grants.filter((_, j) => j !== i))}
+              >
+                <Trash2 />
+              </Button>
+            </li>
+          ))}
+        </ul>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-2"
+          onClick={() => setGrants([...grants, { target: '*', level: 'read' }])}
+        >
+          <Plus />
+          添加授权
+        </Button>
+      </section>
+    </>
   );
 }
 

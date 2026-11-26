@@ -25,6 +25,7 @@ def create_app(service=None):
     @asynccontextmanager
     async def lifespan(app):
         app.state.host = service or default_host()
+        await app.state.host.recover()
         yield
         await app.state.host.close()
     app = FastAPI(title='AxcAgentEngine Workbench Host', lifespan=lifespan)

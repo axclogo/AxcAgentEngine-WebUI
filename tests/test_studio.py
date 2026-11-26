@@ -129,7 +129,7 @@ def test_provider_keys_are_encrypted_masked_and_kept(client, monkeypatch):
 
 def test_agent_crud_validate_export_and_model_status(client):
     agent = client.post('/api/agents', json=agent_body('测试员', avatar='🧪')).json()
-    assert agent['modelStatus'] == 'unset' and agent['avatar'] == '🧪' and agent['runtime']['maxRounds'] == 20
+    assert agent['modelStatus'] == 'unset' and agent['avatar'] == '🧪' and agent['runtime']['maxRounds'] == 500
     assert client.post('/api/agents', json=agent_body('测试员')).status_code == 409
     assert client.post('/api/agents', json=agent_body(' ')).status_code == 422
     assert client.post('/api/agents', json=agent_body('x', plugins={'nope': {'enabled': True, 'config': {}}})).status_code == 400

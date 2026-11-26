@@ -61,7 +61,8 @@ export const messageSchema = z.object({
   actor: z.string(),
   text: z.string(),
   streaming: z.boolean().optional(),
-  kind: z.enum(['chat', 'phase', 'interview']),
+  /** notice: completion notice of a background session (sent to the model as a user message). / 后台会话完成通知。 */
+  kind: z.enum(['chat', 'phase', 'interview', 'notice']),
   target: z.string().optional(),
   question: z.string().optional(),
   createdAt: z.string(),
@@ -69,6 +70,18 @@ export const messageSchema = z.object({
   attachments: z.array(attachmentSchema).optional(),
   /** Token usage of the run that produced this assistant reply. / 生成这条回复的那次运行的 token 用量。 */
   usage: z.object({ inputTokens: z.number().int(), outputTokens: z.number().int() }).optional(),
+  /** Run this message belongs to. / 所属运行。 */
+  runId: z.string().optional(),
+  /** This user message started its run. / 该用户消息开启了一轮。 */
+  startsRun: z.boolean().optional(),
+  /** The engine can rewind to before this message (editable). / 引擎可回退到这条消息之前（可编辑）。 */
+  rewindable: z.boolean().optional(),
+  /** notice: held because the wake-up limit was reached. / 达到唤醒上限而积压。 */
+  held: z.boolean().optional(),
+  /** Dispatched by another conversation. / 由其他会话派发。 */
+  originSessionId: z.string().optional(),
+  /** notice: the background conversation that settled. / 通知来源会话。 */
+  sourceSessionId: z.string().optional(),
 });
 export type Message = z.infer<typeof messageSchema>;
 /**
@@ -79,14 +92,21 @@ export type Message = z.infer<typeof messageSchema>;
 export const promptSchema = z.object({
   id,
   order: z.number(),
-  kind: z.enum(['approval', 'question']),
+  kind: z.enum(['approval', 'question', 'session_access']),
   status: z.enum(['pending', 'answered', 'expired']),
   toolName: z.string().optional(),
   arguments: z.record(z.string(), z.unknown()).optional(),
   riskLevel: z.string().optional(),
   question: z.string().optional(),
   options: z.array(z.string()).optional(),
-  /** approval: true/false; question: the answer text. */
+  /** session_access: the requested level and the target conversation. / 会话授权的级别与目标。 */
+  level: z.enum(['read', 'operate']).optional(),
+  targetSessionId: z.string().optional(),
+  targetTitle: z.string().optional(),
+  targetAgentId: z.string().optional(),
+  targetAgentName: z.string().optional(),
+  targetScope: z.string().optional(),
+  /** approval: true/false; question: the answer text; session_access: session | agent | deny. */
   answer: z.union([z.boolean(), z.string()]).optional(),
   createdAt: z.string(),
 });
@@ -129,6 +149,12 @@ export const capabilitiesSchema = z.object({
   edit: z.boolean(),
   /** Answer pending prompts. / 回答待处理的人工交互。 */
   respond: z.boolean().default(false),
+  /** Edit a user message and resend (per message: `startsRun && rewindable`). / 编辑重发。 */
+  editMessage: z.boolean().default(false),
+  /** Start a turn with notices held by the wake-up limit. / 用积压通知继续。 */
+  wake: z.boolean().default(false),
+  /** List / revoke session-access grants. / 查看与撤销会话授权。 */
+  grants: z.boolean().default(false),
 });
 export type Capabilities = z.infer<typeof capabilitiesSchema>;
 export const noCapabilities: Capabilities = Object.fromEntries(
@@ -151,6 +177,22 @@ export const metaSchema = z.object({
   createdAt: z.string().optional(),
   archived: z.boolean().optional(),
   archivedAt: z.string().nullable().optional(),
+  /** edited: archived because the source conversation was edited. / 因编辑源会话而归档。 */
+  archivedReason: z.string().nullable().optional(),
+  editedFrom: z.object({ conversationId: z.string(), messageId: z.string() }).nullable().optional(),
+  forkCheckpointId: z.string().nullable().optional(),
+  provenance: z
+    .object({
+      depth: z.number().int(),
+      chain: z.array(z.string()),
+      parentSessionId: z.string().nullable(),
+      parentRunId: z.string().nullable(),
+      rootSessionId: z.string().nullable(),
+    })
+    .optional(),
+  autoWakeups: z.number().int().optional(),
+  /** The agent's wake-up limit (0 = unlimited). / Agent 的自动唤醒上限。 */
+  maxWakeups: z.number().int().nullable().optional(),
 });
 export type Meta = z.infer<typeof metaSchema>;
 export const snapshotSchema = z.object({
@@ -170,6 +212,17 @@ export const eventSchema = z.discriminatedUnion('kind', [
   z.object({ seq: z.number().int().positive(), kind: z.literal('queue'), value: queueSchema }),
   z.object({ seq: z.number().int().positive(), kind: z.literal('report'), value: z.string().nullable() }),
   z.object({ seq: z.number().int().positive(), kind: z.literal('prompt'), value: promptSchema }),
+  /** Remove items by id (edit and resend). / 按 id 移除条目（编辑重发）。 */
+  z.object({
+    seq: z.number().int().positive(),
+    kind: z.literal('remove'),
+    value: z.object({
+      messages: z.array(z.string()).optional(),
+      activities: z.array(z.string()).optional(),
+      queue: z.array(z.string()).optional(),
+      prompts: z.array(z.string()).optional(),
+    }),
+  }),
 ]);
 export type ResourceEvent = z.infer<typeof eventSchema>;
 export type Scope = { key: string; shortcut?: { shortcut_key: string; context: Record<string, unknown> } };
@@ -187,7 +240,34 @@ export type Command =
   | { type: 'stop' | 'resume' | 'start' | 'pause' | 'delete' | 'archive' | 'unarchive' | 'generateReport' }
   | { type: 'fork'; checkpointId: string }
   | { type: 'interview'; requestId: string; target: string; question: string }
-  | { type: 'respond'; promptId: string; approved?: boolean; answer?: string };
+  | { type: 'respond'; promptId: string; approved?: boolean; answer?: string; choice?: AccessChoice }
+  | { type: 'editPreview'; messageId: string }
+  | { type: 'editMessage'; messageId: string; requestId: string; text: string; attachments: Attachment[] }
+  | { type: 'wake' | 'listGrants' }
+  | { type: 'revokeGrant'; grantId: string };
+export type AccessChoice = 'session' | 'agent' | 'deny';
+export const grantSchema = z.object({
+  id: z.string(),
+  targetType: z.enum(['session', 'agent']),
+  targetId: z.string(),
+  targetTitle: z.string(),
+  level: z.enum(['read', 'operate']),
+  decision: z.enum(['granted', 'denied']),
+  reason: z.string(),
+  createdAt: z.string(),
+});
+export type Grant = z.infer<typeof grantSchema>;
+export interface EditPreview {
+  messages: number;
+  branches: number;
+  sessions: number;
+}
+export interface CommandResult {
+  events?: ResourceEvent[];
+  resource?: Resource;
+  preview?: EditPreview;
+  grants?: Grant[];
+}
 export type Attachment = z.infer<typeof attachmentSchema>;
 export interface Option {
   id: string;
@@ -216,7 +296,7 @@ export interface Host {
     reconnect: () => void,
     error: (error: Error) => void,
   ): () => void;
-  command(resource: Resource, command: Command): Promise<{ events?: ResourceEvent[]; resource?: Resource }>;
+  command(resource: Resource, command: Command): Promise<CommandResult>;
   create(scope: Scope, agentId: string): Promise<Meta>;
   saveSimulation(scope: Scope, definition: SimulationDefinition, id?: string): Promise<Meta>;
   upload?(resource: Resource, file: File, signal: AbortSignal): Promise<Attachment>;
@@ -242,6 +322,17 @@ export function applyEvent(s: Snapshot, e: ResourceEvent): Snapshot {
       return { ...next, report: e.value };
     case 'prompt':
       return { ...next, prompts: upsert(s.prompts, e.value) };
+    case 'remove': {
+      const drop = <T extends { id: string }>(items: T[], ids?: string[]) =>
+        ids?.length ? items.filter((x) => !ids.includes(x.id)) : items;
+      return {
+        ...next,
+        messages: drop(s.messages, e.value.messages),
+        activities: drop(s.activities, e.value.activities),
+        queue: drop(s.queue, e.value.queue),
+        prompts: drop(s.prompts, e.value.prompts),
+      };
+    }
   }
 }
 // Replay only events newer than the authoritative snapshot. / 仅重放晚于权威快照的事件。

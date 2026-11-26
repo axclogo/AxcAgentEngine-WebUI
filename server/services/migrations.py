@@ -5,7 +5,7 @@ instead of every reader tolerating old shapes. ``meta/schemaVersion`` records th
 存储文档读取时不再校验，因此协议变化时一次性改写旧数据，而不是让每个读取方兼容旧格式。
 """
 
-VERSION = 2
+VERSION = 4
 
 
 def _v2(db) -> None:
@@ -29,7 +29,37 @@ def _v2(db) -> None:
         db.put('resource', key, row)
 
 
+def _v3(db) -> None:
+    """Session operations: agent runtime switches and conversation provenance / wake-up fields.
+    会话操作：Agent 运行开关，以及会话的来源链与唤醒计数字段。"""
+    for key, row in db.items('agent'):
+        row['runtime'].setdefault('sessionOperations', False)
+        row['runtime'].setdefault('maxWakeups', 100)
+        db.put('agent', key, row)
+    for key, row in db.items('resource'):
+        if row['kind'] == 'conversation':
+            m = row['snapshot']['meta']
+            m.setdefault('provenance', {'depth': 0, 'chain': [], 'parentSessionId': None, 'parentRunId': None,
+                                        'rootSessionId': None})
+            for field, value in (('autoWakeups', 0), ('forkCheckpointId', None), ('archivedReason', None),
+                                 ('editedFrom', None)):
+                m.setdefault(field, value)
+            db.put('resource', key, row)
+
+
+def _v4(db) -> None:
+    """Agent-level pre-authorization of session access. / Agent 级别的会话预先授权。"""
+    for key, row in db.items('agent'):
+        row['runtime'].setdefault('sessionGrants', [])
+        db.put('agent', key, row)
+
+
 def migrate(db) -> None:
-    if (db.get('meta', 'schemaVersion') or 1) < 2:
+    version = db.get('meta', 'schemaVersion') or 1
+    if version < 2:
         _v2(db)
+    if version < 3:
+        _v3(db)
+    if version < 4:
+        _v4(db)
     db.put('meta', 'schemaVersion', VERSION)

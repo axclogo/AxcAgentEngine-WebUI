@@ -90,13 +90,21 @@ export type PluginInfo = z.infer<typeof pluginInfoSchema>;
 
 // ---------- Agents ----------
 export const runtimeSchema = z.object({
-  maxRounds: z.number().int().min(1).max(500),
+  maxRounds: z.number().int().min(1).max(100000),
   thinking: z.enum(['auto', 'always', 'never']),
   streamIdleTimeout: z.number().positive().nullable(),
   stepTimeout: z.number().positive().nullable(),
   totalTimeout: z.number().positive().nullable(),
   parallelToolCalls: z.boolean(),
   humanInTheLoop: z.boolean(),
+  /** sessions plugin: let the agent read and operate other conversations. / 允许操作其他会话。 */
+  sessionOperations: z.boolean(),
+  /** Automatic wake-ups by completion notices before waiting for the user (0 = unlimited). / 自动唤醒上限。 */
+  maxWakeups: z.number().int().min(0).max(100000),
+  /** Pre-authorized session access: target '*' (every conversation) or an agent id. / 预先授权。 */
+  sessionGrants: z
+    .array(z.object({ target: z.string().min(1), level: z.enum(['read', 'operate']) }))
+    .max(100),
 });
 export const agentInputSchema = z.object({
   name: z.string().trim().min(1, '名称不能为空').max(80),

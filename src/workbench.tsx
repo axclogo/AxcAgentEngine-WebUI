@@ -40,6 +40,9 @@ import {
   Users,
   ShieldAlert,
   MessageCircleQuestion,
+  BellRing,
+  ExternalLink,
+  KeyRound,
 } from 'lucide-react';
 import {
   type Scope,
@@ -48,6 +51,9 @@ import {
   type MessagePart,
   type Command,
   type Prompt,
+  type AccessChoice,
+  type Grant,
+  type EditPreview,
   resourceKey,
 } from './core';
 import { useResource, errorText } from './state';
@@ -57,7 +63,7 @@ import { statusLabel, partLabel, activityLabel } from './labels';
 import { StructuredResult } from './structured';
 import { useStudio } from './provider';
 import { cn } from './lib/utils';
-import { Badge, Button, NativeSelect } from './ui/primitives';
+import { Badge, Button, NativeSelect, Textarea } from './ui/primitives';
 import {
   Combobox,
   Dialog,
@@ -540,7 +546,24 @@ const Presentation = React.createContext<{
   canFork: boolean;
   agentName: string;
   avatar?: string;
-}>({ messages: [], forkAt: new Map(), fork: () => {}, canFork: false, agentName: '' });
+  /** Edit a user message and resend. / 编辑重发。 */
+  edit: (m: Message) => void;
+  canEdit: boolean;
+  /** Open another conversation (session tool cards, notices). / 打开其他会话。 */
+  open: (id: string) => void;
+  /** Live meta of conversations referenced by session tools. / 会话工具引用的会话的实时信息。 */
+  sessionMeta: (id: string) => Meta | undefined;
+}>({
+  messages: [],
+  forkAt: new Map(),
+  fork: () => {},
+  canFork: false,
+  agentName: '',
+  edit: () => {},
+  canEdit: false,
+  open: () => {},
+  sessionMeta: () => undefined,
+});
 
 function ChatMessage() {
   const messageId = useAuiState((s) => s.message.id);
@@ -549,14 +572,30 @@ function ChatMessage() {
   const m = p.messages.find((x) => x.id === messageId);
   if (!m) return null;
   const checkpoint = p.forkAt.get(m.id);
+  if (m.kind === 'notice')
+    return (
+      <MessagePrimitive.Root data-message-id={m.id} className="py-2">
+        <NoticeCard message={m} open={p.open} />
+      </MessagePrimitive.Root>
+    );
   if (m.role === 'user')
     return (
       <MessagePrimitive.Root data-message-id={m.id} className="group flex flex-col items-end gap-1.5 py-2">
-        <span className="sr-only">{m.actor}</span>
+        <span className={m.originSessionId ? 'text-[11px] text-muted-foreground' : 'sr-only'}>{m.actor}</span>
         {m.attachments && m.attachments.length > 0 && <AttachmentList items={m.attachments} />}
         {m.text && (
           <div className="max-w-[85%] rounded-2xl rounded-br-md bg-accent px-3.5 py-2 text-accent-foreground [&_.axc-md]:text-[14px] [&_.axc-md]:leading-relaxed">
             {renderMessage?.(m) ?? <Markdown text={m.text} streaming={m.streaming} Link={Link} />}
+          </div>
+        )}
+        {p.canEdit && m.kind === 'chat' && m.startsRun && m.rewindable && (
+          <div className="opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+            <Tip content="修改这条消息并重新发送；之后的回复会被删除">
+              <Button variant="ghost" size="xs" className="text-muted-foreground" onClick={() => p.edit(m)}>
+                <Pencil />
+                编辑
+              </Button>
+            </Tip>
           </div>
         )}
       </MessagePrimitive.Root>
@@ -651,8 +690,136 @@ function AttachmentList({ items }: { items: NonNullable<Message['attachments']> 
   );
 }
 const partIcon = { thinking: Brain, tool: Wrench, agent: Users, artifact: FileText, text: FileText } as const;
+/**
+ * Completion notice of a background conversation. The model receives it as a user message; the thread shows it
+ * as a system card, never as the user's own words. / 后台会话完成通知：模型侧是 user 消息，界面显示为系统卡片。
+ */
+function NoticeCard({ message: m, open }: { message: Message; open: (id: string) => void }) {
+  const [head, ...rest] = m.text.split('\n');
+  const body = rest.slice(0, -1).join('\n').trim();
+  return (
+    <section
+      aria-label="后台会话通知"
+      data-notice-held={m.held ? 'true' : undefined}
+      className="rounded-xl border border-dashed bg-muted/40 px-3.5 py-2.5 text-sm"
+    >
+      <header className="flex items-center gap-2">
+        <BellRing className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 font-medium">{head}</span>
+        {m.held && (
+          <Badge variant="outline" className="font-normal">
+            等待继续
+          </Badge>
+        )}
+        {m.sourceSessionId && <SessionStatus id={m.sourceSessionId} />}
+        {m.sourceSessionId && (
+          <Button variant="ghost" size="xs" onClick={() => open(m.sourceSessionId!)}>
+            <ExternalLink />
+            打开会话
+          </Button>
+        )}
+      </header>
+      {body && <p className="mt-1.5 line-clamp-4 pl-5.5 whitespace-pre-wrap text-muted-foreground">{body}</p>}
+    </section>
+  );
+}
+
+function StatusBadge({ meta }: { meta: Meta }) {
+  return (
+    <Badge variant={tone(meta.status)} className="font-normal" aria-label="目标会话状态">
+      {meta.archived ? '已归档' : statusLabel(meta.status)}
+    </Badge>
+  );
+}
+function SessionStatus({ id }: { id: string }) {
+  const meta = React.useContext(Presentation).sessionMeta(id);
+  return meta ? <StatusBadge meta={meta} /> : null;
+}
+
+const SESSION_TOOL_LABEL: Record<string, string> = {
+  session_list: '列出会话',
+  session_read: '读取会话',
+  session_send: '发消息给会话',
+  session_stop: '停止会话',
+  session_create: '新建会话',
+  session_watch: '订阅会话',
+  session_wait: '等待通知',
+};
+function parseJson(text: string): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(text);
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+/** session_* tool call: target conversation, outcome and a jump link. / 会话工具卡片：目标、结果与跳转。 */
+function SessionToolCard({ part }: { part: MessagePart }) {
+  const p = React.useContext(Presentation);
+  const data = parseJson(part.text) ?? {};
+  const target = typeof data.session_id === 'string' ? data.session_id : '';
+  const meta = target ? p.sessionMeta(target) : undefined;
+  const running = part.status === 'running';
+  const outcome =
+    part.status === 'failed'
+      ? part.text.slice(0, 120)
+      : data.accepted === true
+        ? '已接收'
+        : data.stopped === true
+          ? '已停止'
+          : data.stopped === false
+            ? '没有在运行'
+            : data.watching === true
+              ? '已订阅'
+              : data.watching === false
+                ? '已取消订阅'
+                : typeof data.count === 'number'
+                  ? `${data.count} 个会话`
+                  : data.timed_out === true
+                    ? '等待超时'
+                    : '';
+  return (
+    <div
+      data-part-id={part.id}
+      data-session-tool={part.title}
+      className="my-2 flex items-center gap-2 rounded-lg border bg-card/60 px-3 py-2 text-sm"
+    >
+      <Users className="size-3.5 shrink-0 text-muted-foreground" />
+      <span className="text-muted-foreground">{SESSION_TOOL_LABEL[part.title ?? ''] ?? part.title}</span>
+      {target && (
+        <span className="max-w-48 truncate text-[12.5px] font-medium">
+          {meta?.title ?? String(data.title || target)}
+        </span>
+      )}
+      {meta && <StatusBadge meta={meta} />}
+      <span
+        className={cn(
+          'min-w-0 flex-1 truncate text-[12px]',
+          part.status === 'failed' ? 'text-destructive' : 'text-muted-foreground',
+        )}
+      >
+        {running ? '' : outcome}
+      </span>
+      {running ? (
+        <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+      ) : (
+        target && (
+          <Button variant="ghost" size="xs" onClick={() => p.open(target)}>
+            <ExternalLink />
+            打开
+          </Button>
+        )
+      )}
+    </div>
+  );
+}
+
 function PartBlock({ part, streaming }: { part: MessagePart; streaming?: boolean }) {
   const { Link } = useStudio();
+  if (part.kind === 'tool' && part.title?.startsWith('session_') && part.title in SESSION_TOOL_LABEL)
+    return <SessionToolCard part={part} />;
   const Icon = partIcon[part.kind];
   const running = part.status === 'running' || (streaming && part.kind === 'thinking' && !part.status);
   return (
@@ -753,6 +920,11 @@ function Conversation({
   const [forkOpen, setForkOpen] = React.useState(false);
   const [infoOpen, setInfoOpen] = React.useState(false);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
+  // Edit and resend: draft -> preview counts -> confirm. / 编辑重发：草稿 -> 影响预览 -> 确认。
+  const [editing, setEditing] = React.useState<Message | null>(null);
+  const [editText, setEditText] = React.useState('');
+  const [editPreview, setEditPreview] = React.useState<EditPreview | null>(null);
+  const editReceipt = React.useRef('');
   const sendLock = React.useRef(false);
   const receipt = React.useRef({ fingerprint: '', id: '' });
   const canUpload = React.useRef(false);
@@ -822,6 +994,55 @@ function Conversation({
       // Failures are already shown in the header via useResource's error state. / 失败已由 useResource 的 error 展示。
       .catch(() => {});
   };
+  const startEdit = (m: Message) => {
+    setEditing(m);
+    setEditText(m.text);
+    setEditPreview(null);
+    editReceipt.current = crypto.randomUUID();
+  };
+  const previewEdit = () => {
+    if (!editing || !editText.trim()) return;
+    void command({ type: 'editPreview', messageId: editing.id })
+      .then((r) => {
+        if (mounted.current && r.preview) setEditPreview(r.preview);
+      })
+      .catch(() => {});
+  };
+  const confirmEdit = async () => {
+    if (!editing) return;
+    await command({
+      type: 'editMessage',
+      messageId: editing.id,
+      requestId: editReceipt.current,
+      text: editText.trim(),
+      attachments: editing.attachments ?? [],
+    });
+    if (mounted.current) {
+      setEditing(null);
+      setEditPreview(null);
+    }
+  };
+  // Conversations referenced by session tools or notices, refreshed while any of them is running.
+  // 会话工具或通知引用的会话；其中有运行中的会话时定期刷新。
+  const referenced = React.useMemo(
+    () =>
+      (s?.messages ?? []).some(
+        (m) =>
+          m.kind === 'notice' || m.parts?.some((x) => x.kind === 'tool' && x.title?.startsWith('session_')),
+      ),
+    [s?.messages],
+  );
+  const others = useQuery({
+    queryKey: ['conversations', scope.key, '*'],
+    queryFn: ({ signal }) =>
+      client.list('conversation', scope, { keyword: '', mode: '', status: '', agentId: '' }, signal),
+    enabled: referenced,
+    refetchInterval: (q) => (q.state.data?.some((m) => m.status === 'running') ? 5000 : false),
+  });
+  const sessionMeta = React.useCallback(
+    (ref: string) => others.data?.find((m) => m.id === ref),
+    [others.data],
+  );
   const forkAt = React.useMemo(() => {
     const map = new Map<string, string>();
     for (const cp of s?.meta.checkpoints ?? []) if (cp.messageId) map.set(cp.messageId, cp.id);
@@ -847,6 +1068,10 @@ function Conversation({
           canFork: !!c?.fork && !busy,
           agentName: agentInfo?.name ?? s.meta.agentId,
           avatar: agentInfo?.avatar,
+          edit: startEdit,
+          canEdit: !!c?.editMessage && !busy && !blocked,
+          open: onSelect,
+          sessionMeta,
         }}
       >
         <ThreadPrimitive.Root className="flex h-full min-h-0 flex-col">
@@ -868,6 +1093,11 @@ function Conversation({
               <Tip content="这是一个分支会话">
                 <GitBranch className="size-3.5 shrink-0 text-muted-foreground" aria-label="分支" />
               </Tip>
+            )}
+            {s.meta.editedFrom && (
+              <Badge variant="outline" className="font-normal">
+                分叉点已被编辑
+              </Badge>
             )}
             <div className="ml-auto flex items-center gap-1">
               {c?.stop && (
@@ -983,6 +1213,21 @@ function Conversation({
                     {error || sendError}
                   </p>
                 )}
+                {c?.wake && (
+                  <section
+                    aria-label="自动唤醒已达上限"
+                    className="mb-2 flex items-center gap-2 rounded-xl border bg-muted/40 px-3 py-2 text-sm"
+                  >
+                    <BellRing className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1">
+                      自动唤醒已达上限（{s.meta.autoWakeups ?? 0}/{s.meta.maxWakeups ?? '—'}
+                      ），后台会话的通知已暂存
+                    </span>
+                    <Button size="sm" disabled={busy} onClick={() => act({ type: 'wake' })}>
+                      继续
+                    </Button>
+                  </section>
+                )}
                 {s.prompts
                   .filter((p) => p.status === 'pending')
                   .map((p) => (
@@ -1051,7 +1296,25 @@ function Conversation({
                 <dd>
                   <code className="font-mono text-[12px] break-all">{s.meta.id}</code>
                 </dd>
+                {!!s.meta.provenance?.depth && (
+                  <>
+                    <dt className="text-muted-foreground">派发来源</dt>
+                    <dd>
+                      第 {s.meta.provenance.depth} 层
+                      {s.meta.provenance.parentSessionId && (
+                        <Button
+                          variant="link"
+                          size="xs"
+                          onClick={() => onSelect(s.meta.provenance!.parentSessionId!)}
+                        >
+                          打开上级会话
+                        </Button>
+                      )}
+                    </dd>
+                  </>
+                )}
               </dl>
+              {c?.grants && <GrantList command={command} />}
             </DialogContent>
           )}
         </Dialog>
@@ -1067,6 +1330,50 @@ function Conversation({
             />
           )}
         </Dialog>
+        <Dialog open={!!editing && !editPreview} onOpenChange={(v) => !v && setEditing(null)}>
+          {editing && !editPreview && (
+            <DialogContent
+              size="md"
+              title="编辑消息"
+              description="修改后重新发送，这条消息之后的回复会被删除。"
+            >
+              <form
+                className="flex flex-col gap-3"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  previewEdit();
+                }}
+              >
+                <Textarea
+                  aria-label="编辑内容"
+                  rows={5}
+                  value={editText}
+                  onChange={(e) => setEditText(e.target.value)}
+                />
+                <div className="flex justify-end gap-2">
+                  <Button type="button" variant="outline" onClick={() => setEditing(null)}>
+                    取消
+                  </Button>
+                  <Button type="submit" disabled={busy || !editText.trim()}>
+                    重新发送
+                  </Button>
+                </div>
+              </form>
+            </DialogContent>
+          )}
+        </Dialog>
+        <Confirm
+          open={!!editPreview}
+          onOpenChange={(v) => !v && setEditPreview(null)}
+          title="编辑并重新发送？"
+          description={
+            editPreview
+              ? `将删除 ${editPreview.messages} 条消息，归档 ${editPreview.branches} 个分支和 ${editPreview.sessions} 个派生会话`
+              : ''
+          }
+          confirmText="确认发送"
+          onConfirm={confirmEdit}
+        />
         <Confirm
           open={confirmDelete}
           onOpenChange={setConfirmDelete}
@@ -1256,9 +1563,37 @@ function PromptCard({
 }: {
   prompt: Prompt;
   busy: boolean;
-  onRespond: (r: { approved?: boolean; answer?: string }) => void;
+  onRespond: (r: { approved?: boolean; answer?: string; choice?: AccessChoice }) => void;
 }) {
   const [answer, setAnswer] = React.useState('');
+  if (p.kind === 'session_access')
+    return (
+      <section
+        aria-label="会话授权"
+        className="mb-2 rounded-xl border border-amber-500/40 bg-amber-500/5 p-3 text-sm"
+      >
+        <header className="flex items-center gap-2 font-medium">
+          <KeyRound className="size-4 text-amber-600 dark:text-amber-400" />
+          Agent 想{p.level === 'operate' ? '操作' : '读取'}会话「{p.targetTitle}」
+        </header>
+        <p className="mt-1 pl-6 text-[12px] text-muted-foreground">
+          所属 Agent：{p.targetAgentName || p.targetAgentId}
+          {p.targetScope && p.targetScope !== 'local' && ` · 空间：${p.targetScope}`}
+          {p.level === 'operate' && ' · 操作包括发消息、停止，并包含读取'}
+        </p>
+        <div className="mt-2.5 flex flex-wrap justify-end gap-2">
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => onRespond({ choice: 'deny' })}>
+            拒绝
+          </Button>
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => onRespond({ choice: 'agent' })}>
+            该 Agent 的全部会话
+          </Button>
+          <Button size="sm" disabled={busy} onClick={() => onRespond({ choice: 'session' })}>
+            仅这个会话
+          </Button>
+        </div>
+      </section>
+    );
   if (p.kind === 'approval')
     return (
       <section
@@ -1331,6 +1666,56 @@ function PromptCard({
           回答
         </Button>
       </form>
+    </section>
+  );
+}
+
+/** Session-access grants of this conversation, revocable. / 本会话的会话授权，可撤销。 */
+function GrantList({ command }: { command: (c: Command) => Promise<{ grants?: Grant[] }> }) {
+  const [grants, setGrants] = React.useState<Grant[] | null>(null);
+  const load = React.useCallback(() => {
+    void command({ type: 'listGrants' })
+      .then((r) => setGrants(r.grants ?? []))
+      .catch(() => setGrants([]));
+  }, [command]);
+  React.useEffect(load, [load]);
+  return (
+    <section aria-label="会话授权" className="mt-4 border-t pt-3">
+      <h3 className="mb-2 text-sm font-medium">会话授权</h3>
+      {grants === null ? (
+        <p className="text-sm text-muted-foreground">正在读取…</p>
+      ) : grants.length === 0 ? (
+        <p className="text-sm text-muted-foreground">还没有授权记录。</p>
+      ) : (
+        <ul className="flex flex-col gap-1.5">
+          {grants.map((g) => (
+            <li key={g.id} className="flex items-center gap-2 text-sm">
+              <Badge variant={g.decision === 'granted' ? 'secondary' : 'destructive'} className="font-normal">
+                {g.decision === 'granted' ? '允许' : '拒绝'}
+                {g.level === 'operate' ? '操作' : '读取'}
+              </Badge>
+              <span className="min-w-0 flex-1 truncate">
+                {g.targetType === 'agent'
+                  ? `Agent「${g.targetTitle}」的全部会话`
+                  : `会话「${g.targetTitle}」`}
+                {g.reason === 'timeout' && <span className="text-muted-foreground">（超时未选择）</span>}
+              </span>
+              <Button
+                variant="ghost"
+                size="xs"
+                aria-label={`撤销 ${g.targetTitle}`}
+                onClick={() =>
+                  void command({ type: 'revokeGrant', grantId: g.id })
+                    .then(load)
+                    .catch(() => {})
+                }
+              >
+                撤销
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

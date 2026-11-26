@@ -218,6 +218,7 @@ function ArchiveTree({
               {statusLabel(m.status)} · 归档于 {formatTime(m.archivedAt ?? undefined)}
               {kids.length > 0 && ` · ${kids.length} 个分支`}
               {depth === 0 && parent && !parent.archived && ` · 来自「${parent.title}」的分支`}
+              {m.archivedReason === 'edited' && ' · 因编辑源会话而归档'}
             </span>
           </button>
           <Button variant="ghost" size="xs" aria-label={`恢复 ${m.title}`} onClick={() => onRestore(m)}>

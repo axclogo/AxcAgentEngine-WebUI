@@ -45,13 +45,13 @@ docs/       协议与架构说明
 
 ## 启动
 
-需要 Node 22+、Python 3.11+、AxcAgentEngine 3.1.0rc1。Python 依赖统一用 [uv](https://docs.astral.sh/uv/) 安装：
+需要 Node 22+、Python 3.11+、AxcAgentEngine 3.3.2。Python 依赖统一用 [uv](https://docs.astral.sh/uv/) 安装：
 
 ```sh
 npm ci
 uv venv .venv --python 3.13
 uv pip install --python .venv/bin/python -r server/requirements.txt
-# 若包索引还没有 3.1.0rc1，先从引擎源码安装：
+# 若包索引还没有 3.3.2，先从引擎源码安装：
 # uv pip install --python .venv/bin/python '/path/to/AxcAgentEngine[api]'
 ```
 

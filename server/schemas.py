@@ -75,14 +75,26 @@ class ProviderTestInput(Input):
 Timeout = Annotated[float, Field(gt=0)] | None
 
 
+class SessionGrantInput(Input):
+    """Pre-authorization of this agent's conversations: target '*' (every conversation) or an agent id.
+    预先授权本 Agent 的会话访问：target 为 '*'（全部会话）或某个 Agent ID。"""
+    target: Annotated[str, _non_empty('授权目标不能为空')]
+    level: Literal['read', 'operate']
+
+
 class RuntimeInput(Input):
-    max_rounds: int = Field(default=20, ge=1, le=500)
+    max_rounds: int = Field(default=500, ge=1, le=100000)  # Long runs; engine 3.3.1 range. / 长任务，对齐引擎。
     thinking: Literal['auto', 'always', 'never'] = 'auto'
     stream_idle_timeout: Timeout = None
     step_timeout: Timeout = None
     total_timeout: Timeout = None
     parallel_tool_calls: bool = True
     human_in_the_loop: bool = False
+    # sessions plugin: operate other conversations; automatic wake-ups per caller (0 = unlimited).
+    # 允许操作其他会话；自动唤醒上限（0 为不限制）。
+    session_operations: bool = False
+    max_wakeups: int = Field(default=100, ge=0, le=100000)
+    session_grants: list[SessionGrantInput] = Field(default=[], max_length=100)
 
 
 class ModelsInput(Input):

@@ -39,9 +39,17 @@ Tailwind v4 编译 `src/styles.css`，`postcss.config.mjs` 再做两件事：
 - 技能按 Agent 软链到专属目录作为 skill 插件的 `paths`；知识库目录作为 knowledge 插件的 `sources`；图谱用持久化的 `GraphStore` 挂载为 `graph.store`，管理页与 Agent 共用同一份数据。
 - 运行时只为绑定资源授予对应能力（`skill_read`、`knowledge_read`、`graph_*`），不授予 `shell`。
 - `models.py` 的 `CompatibleClient` 修正两处引擎请求与 OpenAI 兼容服务（如 DeepSeek）的不一致：`thinking` 字段取值、回放 `tool_calls` 缺少 `type`。
-- 分叉：引擎分叉的是运行状态，不是会话历史；宿主把截至分叉点的对话写入分支会话的历史，分支里继续发消息时模型能看到之前的内容。
+- 分叉：引擎 3.3.0 的 `fork_run` 同时写入分支会话的历史（含工具调用与结果）；宿主只负责分支树、`forkCheckpointId` 和来源链。
+- 编辑重发：每条消息记录 `runId`。编辑时按 run 计算影响范围，用引擎 `rewind_session(before_run_id)` 回退会话历史；宿主删除对应消息与切点，归档受影响的分支和派生会话，再重新发送。
 
 - 人工交互：引擎 `runtime.human_in_the_loop` 字段在引擎内不生效，宿主改为由该开关启用 `human_in_the_loop` 插件，并为每次运行提供审批通道；待处理提示随快照与事件下发，回答后插件继续执行。
+- 会话操作（`services/sessions.py`，契约见引擎 `docs/SESSIONS.md`）：
+  - `SessionsService` 实现引擎 `SessionService` 的 7 个方法。存储：`session_grant`（授权）、`session_watch`（订阅）、`session_dispatch`（派发：哪个会话的哪一轮把任务送进了哪次运行）、`run_provenance`（每次运行开始时的来源链）。
+  - 来源链：派发时子来源链为「发起方本轮的 depth+1、chain+[发起方]」。`session_create` 新建的会话把它存进会话 meta；发给已有空闲会话只影响那一轮。每次 `stream`/`resume_stream`/`fork_run` 都在 metadata 注入 `session_provenance={depth, chain}`、`session_title`、`turn_origin`；resume 取该运行记录的来源链。
+  - 上级集合：本轮 chain，加上往本轮里送过 live input 的发起方及其 chain。引擎拦截 chain；宿主在每个方法里复核整个集合。
+  - 授权：先查记录与调用方 Agent 的预先授权（`runtime.sessionGrants`；任何明确拒绝优先；拒绝读取会阻断操作；操作授权包含读取），没有记录时通过 `PromptChannel` 的宿主提示询问用户。宿主提示自己持有 future，不经过引擎审批队列；只开会话操作时不把审批队列交给引擎。
+  - `max_active`：全局派发锁内统计发起方派发且仍在运行的会话数，达到上限直接拒绝，不排队。
+  - 完成通知：运行结束（完成、停止、失败）后，给本轮的派发方和订阅方投递通知，文案、幂等 id 和投递方式由引擎 `notices` 模块决定（`start` 开新一轮、`inject` 作为 live input，两者都计一次唤醒；`hold` 只写记录、`drop` 丢弃）。`interrupted` 不通知；编辑时被停止的运行不通知被编辑的会话。终态先持久化再投递，关闭期间结束的运行在启动时补发（通知 id 幂等）。旧运行收尾时只写属于自己的状态和切点，不影响已经开始的新一轮；收尾阶段被取消的运行保留终态，由启动时补发通知。运行中的发起方 60 秒内仍不能接收通知时，投递直接报错、不标记已通知，下次启动补发。编辑的影响范围包含派生会话再新建出的会话（任意层）。用户亲自发消息、点「继续」、编辑时清零唤醒计数，并把积压通知带进新的一轮。
 - 运行记录（`services/runs.py`）是 token 累计、失败分析、经验蒸馏、成本分析的唯一数据来源；工具成败取自引擎审计回调（`tool_result` 事件本身不带成败）。
 - 记忆：宿主给引擎提供 SQLite 版 KV 存储，记忆插件的数据因此持久化并可在「记忆」页查看。
 - MCP：服务的环境变量和请求头值加密保存；写入 agent.yaml 时显示为 `••••`，真实值只通过实例化覆盖传给引擎。

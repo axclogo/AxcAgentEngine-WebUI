@@ -27,11 +27,12 @@ from .common import Collection, now, uid
 STRATEGIES = ('react', 'por')
 # Plugins enabled and configured by bindings or runtime switches, hidden from the plugin list.
 # 由资源绑定或运行开关托管的插件，不出现在插件列表。
-MANAGED = ('skill', 'knowledge', 'graph', 'human_in_the_loop', 'mcp')
+MANAGED = ('skill', 'knowledge', 'graph', 'human_in_the_loop', 'mcp', 'sessions')
 # MCP tools carry the plugin's ``capability`` config, default '' (no capability), so they need no grant.
 # MCP 工具的能力标签取插件 capability 配置，默认为空，无需授权。
 MANAGED_CAPABILITIES = {'skill': ['skill_read'], 'knowledge': ['knowledge_read'],
-                        'graph': ['graph_read', 'graph_write', 'graph_delete'], 'human_in_the_loop': ['human_approval']}
+                        'graph': ['graph_read', 'graph_write', 'graph_delete'], 'human_in_the_loop': ['human_approval'],
+                        'sessions': ['session_read', 'session_operate']}
 
 
 def build_registry() -> PluginRegistry:
@@ -76,6 +77,7 @@ class AgentService:
         self.registry = registry
         self.providers, self.skills, self.knowledge, self.graphs = providers, skills, knowledge, graphs
         self.mcp, self.runs = mcp, runs
+        self.sessions = None  # Set by the host; mounted as sessions.service. / 由宿主设置，挂载为 sessions.service。
         self.cache: dict[str, tuple[str, Any, list]] = {}
 
     # ---------- CRUD ----------
@@ -118,6 +120,8 @@ class AgentService:
         # The knowledge plugin mounts one embedding client per agent. / 知识库插件每个 Agent 只挂载一个向量模型。
         if len(self.knowledge.embedding_models(row['bindings']['knowledge'])) > 1:
             errors.append({'path': 'bindings.knowledge', 'message': '绑定的知识库必须使用同一个向量模型（或都不使用）'})
+        errors += [{'path': 'runtime.sessionGrants', 'message': f"授权目标 Agent 不存在：{g['target']}"}
+                   for g in row['runtime']['sessionGrants'] if g['target'] != '*' and self.items.find(g['target']) is None]
         return errors
     # ---------- agent.yaml ----------
     def render(self, row: dict, name: str, skill_dir: Path, secrets: bool = False) -> dict:
@@ -148,6 +152,11 @@ class AgentService:
         # 引擎不读取 runtime.human_in_the_loop，开关改为以默认配置启用插件（含 ask_human）。
         if rt['humanInTheLoop']:
             plugins['human_in_the_loop'] = {'enabled': True, 'ask_human': True}
+        # Session operations: stored plugin config (e.g. max_active) plus the runtime wake-up limit.
+        # 会话操作：保存的插件配置（如 max_active）加运行参数里的唤醒上限。
+        if rt['sessionOperations']:
+            plugins['sessions'] = {**settings.get('sessions', {}).get('config', {}), 'enabled': True,
+                                   'max_wakeups': rt['maxWakeups']}
         servers = self._mcp_servers(row, secrets)
         if servers:
             plugins['mcp'] = {'enabled': True, 'servers': servers}
@@ -293,6 +302,10 @@ class AgentService:
         servers = self._mcp_servers(row, secrets=True)
         graph = self._bound_graph(row)
         mounts = {'graph.store': self.graphs.store(graph)} if graph else {}
+        if row['runtime']['sessionOperations']:
+            if self.sessions is None:
+                raise ValueError('宿主未提供会话服务，不能启用会话操作')
+            mounts['sessions.service'] = self.sessions
         try:
             embedding = self._embedding(row, override, clients)
             if embedding is not None:

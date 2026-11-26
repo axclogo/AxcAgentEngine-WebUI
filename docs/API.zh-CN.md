@@ -114,7 +114,7 @@ Agent 名称唯一。宿主以 Agent ID 作为引擎内名称，定义变更后�
 - `Message.attachments?: Attachment[]`：用户消息携带的附件。图片以多模态 `image_base64` 传给引擎；文本类文件抽取为文本片段；其他文件以 `file_ref` 传递。
 - `Meta.archived`、`Meta.archivedAt`；命令 `archive` / `unarchive` 连同全部分叉后代一起归档或恢复。会话的 `capabilities.delete` 仅在已归档时为 true，未归档会话的 `delete` 命令返回 400。
 - `Meta.capabilities.archive`：任何未运行的可见会话都可归档。
-- `fork` 命令：`checkpointId` 必须来自该会话的 `meta.checkpoints`；可以是任意一次运行的切点。分支会话写入截至该切点的对话历史。
+- `fork` 命令：`checkpointId` 必须来自该会话的 `meta.checkpoints`；可以是任意一次运行的切点。引擎（3.3.0）把切点的完整历史（含工具调用与结果）写入分支会话；分支 meta 记录 `forkCheckpointId`，并继承父会话的 `provenance`。
 - `Message.parts`：宿主把 `thinking_*`、`tool_call/tool_result`、`sub_agent_*` 事件归并到助手消息的分段中（kind=thinking/tool/agent），工具结果为 JSON 时原样放在 text。
 
 ## 人工交互（审批与提问）
@@ -126,6 +126,32 @@ Agent 运行参数 `runtime.humanInTheLoop=true` 时，宿主为该 Agent 启用
   - `question`：模型调用 `ask_human`，带 `question/options`。
 - 命令 `{type:'respond', promptId, approved?, answer?}`：approval 用 `approved`，question 用 `answer`。只能回答 `pending` 的提示，回答后 `status='answered'`、`answer` 为回答值。能力位 `capabilities.respond` 在存在待处理提示时为 true。
 - 运行结束（完成 / 停止 / 失败）或宿主重启时，未回答的提示变为 `expired`。
+
+## 编辑重发
+- `Message.runId`：消息所属的运行；`Message.startsRun`：该用户消息开启了这一轮；`Message.rewindable`：引擎能回退到这一轮之前（运行结束后由宿主按 `Agent.can_rewind` 标记）。三者都为真、且 `capabilities.editMessage` 为真时，前端在这条用户消息上显示「编辑」。
+- `capabilities.editMessage`：会话未归档、未运行、不是来源页受限的会话。
+- 命令 `{type:'editPreview', messageId}` → `{preview:{messages, branches, sessions}}`：删除的消息数、要归档的分支数（含后代）、要归档的派生会话数（含其分支），不做修改。
+- 命令 `{type:'editMessage', messageId, requestId, text, attachments}`：
+  1. 停止被删轮次里 `session_create` 出的、仍在运行的会话，且不给本会话发通知；
+  2. 调用引擎 `rewind_session(session_id, before_run_id)`，失败时报错、快照不变；
+  3. 归档从被删部分分叉出的分支、被删轮次派生的会话（`archivedReason='edited'`、`editedFrom={conversationId, messageId}`）；
+  4. 撤销被删轮次产生的派发与订阅；删除被编辑消息及之后的消息、执行进度、队列、提示和作废切点；`autoWakeups` 清零；
+  5. 以新文本开启新一轮。返回新用户消息事件。
+- 事件 `kind:'remove'`，`value: {messages?, activities?, queue?, prompts?: string[]}`：按 id 移除条目。
+- 旧数据（没有 `runId`，或产生于 3.3.0 之前的运行）不可编辑。
+
+## 会话操作（sessions 插件）
+Agent 运行参数 `runtime.sessionOperations=true` 时，宿主启用引擎 `sessions` 插件（`max_wakeups` 取 `runtime.maxWakeups`；`max_active`、`max_depth`、`allow_create`、`allow_operate`、`cross_agent` 取 Agent 的 `plugins.sessions.config`，未设置时用引擎默认值；Agent 编辑页「运行参数」在打开开关后可设置），授予 `session_read`、`session_operate` 能力，并把 `SessionsService`（`server/services/sessions.py`）挂载为 `sessions.service`。该插件由此开关托管，不出现在插件列表。
+- `runtime.maxWakeups`：0–100000，默认 100，0 为不限制。通知新开一轮（start）或送入当前这一轮（inject）都计一次；到达上限后，运行中和空闲时都只写入积压通知（hold）。
+- `runtime.maxRounds`：1–100000，默认 500（与引擎 3.3.1 一致）。
+- `runtime.sessionGrants: [{target, level}]`：预先授权，用于无人值守的长任务。`target` 为 `'*'`（全部会话）或 Agent ID（该 Agent 的全部会话），`level` 为 `read` 或 `operate`（含读取）。命中时不弹授权提示、不写会话级记录；用户对某个会话的明确拒绝仍然优先；`cross_agent=false` 时仍拒绝其他 Agent 的会话。`target` 指向不存在的 Agent 时保存报错。
+- 列表接口返回的会话 meta 用于工具卡片与通知卡片显示目标会话的标题和实时状态（其中有运行中的会话时每 5 秒刷新）。
+- 授权提示 `Prompt.kind='session_access'`，字段 `level`（`read`/`operate`）、`targetSessionId`、`targetTitle`、`targetAgentId`、`targetAgentName`、`targetScope`。回答命令 `{type:'respond', promptId, choice}`，`choice` 为 `session`（仅这个会话）、`agent`（该 Agent 的全部会话）或 `deny`。120 秒内未回答视为拒绝；运行结束或重启时仍未回答，返回 `unavailable` 且不记录。
+- 授权命令（`capabilities.grants`）：`{type:'listGrants'}` → `{grants:[{id, targetType, targetId, targetTitle, level, decision, reason, createdAt}]}`；`{type:'revokeGrant', grantId}` 删除一条记录，下一次运行生效。
+- 完成通知消息：`kind='notice'`、`role='user'`、`actor='后台会话通知'`、`id='notice:{目标会话}:{目标运行}'`（同一运行停止后恢复再结束，第 N 次结束为 `notice:{目标会话}:{目标运行}.N`）、`sourceSessionId`。
+- `capabilities.resume`：运行最新检查点里有结果未知的写操作（工具被中途打断）时为 false，引擎拒绝恢复这类运行；用户发新消息继续。达到唤醒上限时 `held=true`，`capabilities.wake` 为真；命令 `{type:'wake'}` 以全部积压通知开启新一轮并清零计数。
+- 派发来的用户消息带 `originSessionId`，`actor` 为「会话「发起方标题」」。
+- `Meta.provenance {depth, chain, parentSessionId, parentRunId, rootSessionId}`、`Meta.autoWakeups`、`Meta.maxWakeups`（派生字段，取 Agent 配置）、`Meta.forkCheckpointId`、`Meta.archivedReason`、`Meta.editedFrom`。
 
 ## Token 用量
 

@@ -39,6 +39,10 @@ export type {
   ResourceEvent,
   Attachment,
   Prompt,
+  AccessChoice,
+  Grant,
+  EditPreview,
+  CommandResult,
   SimulationDefinition,
   Mode,
 } from './core';
